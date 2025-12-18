@@ -1,0 +1,458 @@
+{
+  "metadata": {
+    "name": "UAE Corporate Tax Law Q&A Dataset",
+    "version": "1.0",
+    "created": "2025-12-18",
+    "document": "Federal-Decree-Law-No.-47-of-2022-EN.pdf",
+    "description": "Synthetic Q&A pairs for RAG evaluation based on UAE Corporate Tax Law",
+    "total_questions": 25
+  },
+  "questions": [
+    {
+      "id": "q1",
+      "category": "tax_rates",
+      "difficulty": "easy",
+      "question": "What is the standard corporate tax rate in the UAE?",
+      "expected_answer": "9% on taxable income exceeding AED 375,000",
+      "expected_pages": [
+        6,
+        10,
+        12
+      ],
+      "keywords": [
+        "9%",
+        "375,000",
+        "taxable income",
+        "rate"
+      ]
+    },
+    {
+      "id": "q2",
+      "category": "exemptions",
+      "difficulty": "easy",
+      "question": "Who is exempt from corporate tax in the UAE?",
+      "expected_answer": "Government entities, government controlled entities, extractive businesses, non-extractive natural resource businesses, qualifying public benefit entities, qualifying investment funds, public pension funds, social security funds, and private pension funds",
+      "expected_pages": [
+        8,
+        7
+      ],
+      "keywords": [
+        "exempt",
+        "government",
+        "pension",
+        "investment fund"
+      ]
+    },
+    {
+      "id": "q3",
+      "category": "effective_date",
+      "difficulty": "easy",
+      "question": "When does the UAE Corporate Tax Law come into effect?",
+      "expected_answer": "Tax Periods commencing on or after 1 June 2023",
+      "expected_pages": [
+        21,
+        22,
+        23
+      ],
+      "keywords": [
+        "1 June 2023",
+        "Tax Period",
+        "effect",
+        "commence"
+      ]
+    },
+    {
+      "id": "q4",
+      "category": "taxable_income",
+      "difficulty": "medium",
+      "question": "How is taxable income calculated under the UAE Corporate Tax Law?",
+      "expected_answer": "Taxable income is calculated based on accounting income prepared in accordance with accounting standards, subject to adjustments as specified in the law",
+      "expected_pages": [
+        24,
+        5,
+        23
+      ],
+      "keywords": [
+        "taxable income",
+        "accounting",
+        "adjustments",
+        "calculated"
+      ]
+    },
+    {
+      "id": "q5",
+      "category": "transfer_pricing",
+      "difficulty": "medium",
+      "question": "What is the arm's length principle for transfer pricing?",
+      "expected_answer": "Transactions between Related Parties must be conducted as if they were between independent parties dealing at arm's length",
+      "expected_pages": [
+        36,
+        37
+      ],
+      "keywords": [
+        "arm's length",
+        "Related Parties",
+        "transfer pricing",
+        "independent"
+      ]
+    },
+    {
+      "id": "q6",
+      "category": "penalties",
+      "difficulty": "medium",
+      "question": "What are the penalties for violations under the Corporate Tax Law?",
+      "expected_answer": "Administrative penalties as specified in the Tax Procedures Law, and the Authority may assess corporate tax where a person fails to comply",
+      "expected_pages": [
+        54,
+        55
+      ],
+      "keywords": [
+        "penalties",
+        "violations",
+        "administrative",
+        "assessment"
+      ]
+    },
+    {
+      "id": "q7",
+      "category": "free_zone",
+      "difficulty": "medium",
+      "question": "What are the conditions for a Free Zone Person to benefit from 0% tax rate?",
+      "expected_answer": "Must be a Qualifying Free Zone Person, maintain adequate substance, derive Qualifying Income, and comply with transfer pricing rules",
+      "expected_pages": [
+        22,
+        30,
+        6
+      ],
+      "keywords": [
+        "Free Zone",
+        "Qualifying",
+        "0%",
+        "substance"
+      ]
+    },
+    {
+      "id": "q8",
+      "category": "tax_group",
+      "difficulty": "hard",
+      "question": "What are the requirements for forming a Tax Group?",
+      "expected_answer": "Parent company must own at least 95% of share capital and voting rights, same financial year, prepared using same accounting standards, not exempt persons or Free Zone Persons",
+      "expected_pages": [
+        42,
+        43,
+        44,
+        45
+      ],
+      "keywords": [
+        "Tax Group",
+        "95%",
+        "parent",
+        "ownership"
+      ]
+    },
+    {
+      "id": "q9",
+      "category": "losses",
+      "difficulty": "medium",
+      "question": "How are tax losses carried forward?",
+      "expected_answer": "Tax Losses can be carried forward and set off against Taxable Income of subsequent Tax Periods, subject to limitations based on ownership changes",
+      "expected_pages": [
+        40,
+        32,
+        41
+      ],
+      "keywords": [
+        "losses",
+        "carried forward",
+        "subsequent",
+        "set off"
+      ]
+    },
+    {
+      "id": "q10",
+      "category": "exempt_income",
+      "difficulty": "medium",
+      "question": "What types of income are exempt from corporate tax?",
+      "expected_answer": "Dividends and other profit distributions from UAE companies, capital gains from sale of shares in qualifying conditions, income from qualifying restructuring transactions",
+      "expected_pages": [
+        25,
+        26,
+        33
+      ],
+      "keywords": [
+        "exempt income",
+        "dividends",
+        "capital gains",
+        "restructuring"
+      ]
+    },
+    {
+      "id": "q11",
+      "category": "registration",
+      "difficulty": "easy",
+      "question": "Who must register for corporate tax in the UAE?",
+      "expected_answer": "Every Taxable Person must register for Corporate Tax purposes with the Authority",
+      "expected_pages": [
+        50,
+        25,
+        37
+      ],
+      "keywords": [
+        "register",
+        "Taxable Person",
+        "Authority"
+      ]
+    },
+    {
+      "id": "q12",
+      "category": "tax_returns",
+      "difficulty": "medium",
+      "question": "When must a tax return be filed?",
+      "expected_answer": "Within 9 months from the end of the relevant Tax Period",
+      "expected_pages": [
+        3,
+        51,
+        52
+      ],
+      "keywords": [
+        "9 months",
+        "Tax Period",
+        "file",
+        "return"
+      ]
+    },
+    {
+      "id": "q13",
+      "category": "permanent_establishment",
+      "difficulty": "hard",
+      "question": "What constitutes a Permanent Establishment?",
+      "expected_answer": "A fixed place of business through which the business is wholly or partly carried on, or a person who habitually exercises authority to conclude contracts",
+      "expected_pages": [
+        18,
+        10,
+        31
+      ],
+      "keywords": [
+        "Permanent Establishment",
+        "fixed place",
+        "business",
+        "contracts"
+      ]
+    },
+    {
+      "id": "q14",
+      "category": "related_parties",
+      "difficulty": "medium",
+      "question": "How are Related Parties defined?",
+      "expected_answer": "Persons are related if one controls the other, or they are under common control, or through ownership of 50% or more",
+      "expected_pages": [
+        38,
+        39,
+        36
+      ],
+      "keywords": [
+        "Related Parties",
+        "control",
+        "50%",
+        "ownership"
+      ]
+    },
+    {
+      "id": "q15",
+      "category": "small_business",
+      "difficulty": "easy",
+      "question": "What is the small business relief threshold?",
+      "expected_answer": "Revenue does not exceed AED 3,000,000 in the relevant Tax Period and all previous Tax Periods",
+      "expected_pages": [
+        25,
+        10,
+        12
+      ],
+      "keywords": [
+        "3,000,000",
+        "small business",
+        "relief",
+        "revenue"
+      ]
+    },
+    {
+      "id": "q16",
+      "category": "withholding_tax",
+      "difficulty": "medium",
+      "question": "Is there a withholding tax on payments to non-residents?",
+      "expected_answer": "Withholding Tax at 0% applies to payments of UAE sourced income to non-residents",
+      "expected_pages": [
+        6,
+        35,
+        39
+      ],
+      "keywords": [
+        "Withholding Tax",
+        "0%",
+        "non-residents",
+        "payments"
+      ]
+    },
+    {
+      "id": "q17",
+      "category": "anti_abuse",
+      "difficulty": "hard",
+      "question": "What are the anti-abuse provisions in the law?",
+      "expected_answer": "General Anti-Abuse Rule allows the Authority to make adjustments where arrangements are entered into to obtain a Corporate Tax advantage that is inconsistent with the intention of the law",
+      "expected_pages": [
+        48,
+        49,
+        24
+      ],
+      "keywords": [
+        "anti-abuse",
+        "arrangements",
+        "advantage",
+        "adjustments"
+      ]
+    },
+    {
+      "id": "q18",
+      "category": "accounting",
+      "difficulty": "medium",
+      "question": "What accounting standards must be used?",
+      "expected_answer": "Financial Statements must be prepared in accordance with IFRS or other accounting standards as may be accepted by the Authority",
+      "expected_pages": [
+        24,
+        34,
+        22,
+        23
+      ],
+      "keywords": [
+        "IFRS",
+        "accounting standards",
+        "Financial Statements"
+      ]
+    },
+    {
+      "id": "q19",
+      "category": "business_restructuring",
+      "difficulty": "hard",
+      "question": "What are the conditions for tax-neutral business restructurings?",
+      "expected_answer": "Transfer of assets or liabilities in exchange for shares, parties must be Taxable Persons, and must meet specific conditions including continuity of ownership",
+      "expected_pages": [
+        32,
+        31
+      ],
+      "keywords": [
+        "restructuring",
+        "transfer",
+        "shares",
+        "tax-neutral"
+      ]
+    },
+    {
+      "id": "q20",
+      "category": "deductions",
+      "difficulty": "medium",
+      "question": "What expenditures are deductible for corporate tax purposes?",
+      "expected_answer": "Expenditure incurred wholly and exclusively for business purposes, subject to specific limitations for entertainment, interest, and other specified items",
+      "expected_pages": [
+        33,
+        20,
+        24
+      ],
+      "keywords": [
+        "deductible",
+        "expenditure",
+        "business purposes",
+        "limitations"
+      ]
+    },
+    {
+      "id": "q21",
+      "category": "interest_limitation",
+      "difficulty": "hard",
+      "question": "What is the interest deduction limitation rule?",
+      "expected_answer": "Net interest expenditure is limited to 30% of EBITDA, with excess carried forward for up to 10 years",
+      "expected_pages": [
+        34,
+        33,
+        41
+      ],
+      "keywords": [
+        "interest",
+        "30%",
+        "EBITDA",
+        "limitation"
+      ]
+    },
+    {
+      "id": "q22",
+      "category": "tax_period",
+      "difficulty": "easy",
+      "question": "What is a Tax Period?",
+      "expected_answer": "The Gregorian calendar year or the 12-month period for which the Taxable Person prepares Financial Statements",
+      "expected_pages": [
+        41,
+        8,
+        24
+      ],
+      "keywords": [
+        "Tax Period",
+        "calendar year",
+        "12-month",
+        "Financial Statements"
+      ]
+    },
+    {
+      "id": "q23",
+      "category": "clarifications",
+      "difficulty": "medium",
+      "question": "Can a taxpayer request clarification from the Authority?",
+      "expected_answer": "A Taxable Person may apply to the Authority for a clarification on the application of the provisions of this Decree-Law",
+      "expected_pages": [
+        8,
+        55,
+        9
+      ],
+      "keywords": [
+        "clarification",
+        "apply",
+        "Authority",
+        "provisions"
+      ]
+    },
+    {
+      "id": "q24",
+      "category": "foreign_tax_credit",
+      "difficulty": "hard",
+      "question": "How is foreign tax credit calculated?",
+      "expected_answer": "Credit for foreign tax paid may be claimed against Corporate Tax payable, limited to the amount of Corporate Tax that would be payable on the foreign-sourced income",
+      "expected_pages": [
+        47,
+        28,
+        46
+      ],
+      "keywords": [
+        "foreign tax",
+        "credit",
+        "payable",
+        "foreign-sourced"
+      ]
+    },
+    {
+      "id": "q25",
+      "category": "natural_person",
+      "difficulty": "medium",
+      "question": "When is a natural person subject to corporate tax?",
+      "expected_answer": "A natural person is subject to Corporate Tax if they conduct business or business activity in the UAE with turnover exceeding AED 1,000,000",
+      "expected_pages": [
+        18,
+        2,
+        10
+      ],
+      "keywords": [
+        "natural person",
+        "business",
+        "1,000,000",
+        "turnover"
+      ]
+    }
+  ]
+}

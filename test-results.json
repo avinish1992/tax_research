@@ -1,0 +1,69 @@
+{
+  "timestamp": "2025-12-18T14:31:45.355Z",
+  "metrics": {
+    "ingestion": {
+      "documentName": "Federal-Decree-Law-No-60-of-2023.pdf",
+      "fileSize": 191777,
+      "pageCount": 2,
+      "textLength": 3205,
+      "chunkCount": 4,
+      "totalTokens": 802,
+      "embeddingCost": 0.00001604,
+      "ingestionTimeMs": 9215
+    },
+    "retrieval": {
+      "queryCount": 3,
+      "avgRetrievalTimeMs": 1768.3333333333333
+    },
+    "quality": {
+      "groundedness": 88.33333333333333,
+      "relevance": 86.66666666666667,
+      "faithfulness": 88.33333333333333,
+      "avgSemanticSimilarity": 64.00147281927264,
+      "precision": 100,
+      "recall": 100,
+      "f1Score": 100
+    }
+  },
+  "syntheticQAs": [
+    {
+      "question": "What constitutes the Top-up Tax according to the UAE Corporate Tax Law?",
+      "answer": "The top-up tax imposed on Multinational Enterprises in accordance with this Decree-Law and the rules and controls to be determined by the Cabinet under Article (3) of this Decree-Law for the purposes of the pillar two rules issued by the Organization for Economic Cooperation and Development.",
+      "source_quote": "Top-up Tax: The top-up tax imposed on Multinational Enterprises in accordance with this Decree-Law and the rules and controls to be determined by the Cabinet under Article (3) of this Decree-Law for the purposes of the pillar two rules issued by the Organization for Economic Cooperation and Development."
+    },
+    {
+      "question": "Who is responsible for defining Multinational Enterprises in the UAE Corporate Tax Law?",
+      "answer": "An entity and/or one or more of its member entities located in the State or in a foreign jurisdiction, as specified in a decision to be issued by the Cabinet at the suggestion of the Minister.",
+      "source_quote": "Multinational Enterprise: An entity and/or one or more of its member entities located in the State or in a foreign jurisdiction, as specified in a decision to be issued by the Cabinet at the suggestion of the Minister."
+    },
+    {
+      "question": "What is the total percentage of the effective tax imposed on Multinational Enterprises?",
+      "answer": "The total percentage of the effective tax imposed on them is (15%) fifteen percent.",
+      "source_quote": "so that the total percentage of the effective tax imposed on them is (15%) fifteen percent."
+    },
+    {
+      "question": "What will Corporate Tax and Top-up Tax revenues be subject to?",
+      "answer": "Corporate Tax and Top-up Tax revenues and Administrative Penalties collected under this Decree-Law shall be subject to sharing between the Federal Government and the Local Governments based on the provisions of a federal law in force in this regard.",
+      "source_quote": "Corporate Tax and Top-up Tax revenues and Administrative Penalties collected under this Decree-Law shall be subject to sharing between the Federal Government and the Local Governments based on the provisions of a federal law in force in this regard."
+    },
+    {
+      "question": "When will the provisions of the Top-up Tax come into effect?",
+      "answer": "The provisions of the Top-up Tax specified in Clause (2) of Article One of this Decree-Law shall come into effect as of the date specified in a decision issued by the Cabinet at the suggestion of the Minister.",
+      "source_quote": "the provisions of the Top-up Tax specified in Clause (2) of Article One of this Decree-Law shall come into effect as of the date specified in a decision issued by the Cabinet at the suggestion of the Minister."
+    }
+  ],
+  "sampleRetrievalResults": [
+    {
+      "question": "What constitutes the Top-up Tax according to the UAE Corporate Tax Law?",
+      "topSimilarity": 0.6840644014664152
+    },
+    {
+      "question": "Who is responsible for defining Multinational Enterprises in the UAE Corporate Tax Law?",
+      "topSimilarity": 0.6798435593009238
+    },
+    {
+      "question": "What is the total percentage of the effective tax imposed on Multinational Enterprises?",
+      "topSimilarity": 0.5561362238108402
+    }
+  ]
+}

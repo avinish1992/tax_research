@@ -1,0 +1,95 @@
+
+================================================================================
+                    RAG PIPELINE EVALUATION REPORT
+================================================================================
+Generated: 2025-12-18T15:23:11.778Z
+Dataset: UAE Corporate Tax Law Q&A Dataset
+Document: Federal-Decree-Law-No.-47-of-2022-EN.pdf
+Questions Evaluated: 25
+
+================================================================================
+                         TIMING METRICS
+================================================================================
+┌─────────────────────────────────┬─────────────────┐
+│ Metric                          │ Value           │
+├─────────────────────────────────┼─────────────────┤
+│ Avg Embedding Time              │           892ms │
+│ Avg Search Time                 │           366ms │
+│ Avg Total Query Time            │          1260ms │
+│ Avg TTFT (estimated)            │           965ms │
+├─────────────────────────────────┼─────────────────┤
+│ P50 Query Time                  │          1215ms │
+│ P95 Query Time                  │          1522ms │
+│ P99 Query Time                  │          2937ms │
+│ Min Query Time                  │           992ms │
+│ Max Query Time                  │          2937ms │
+└─────────────────────────────────┴─────────────────┘
+
+================================================================================
+                      RETRIEVAL QUALITY METRICS
+================================================================================
+┌─────────────────────────────────┬─────────────────┐
+│ Metric                          │ Value           │
+├─────────────────────────────────┼─────────────────┤
+│ Precision@5                       │           77.6% │
+│ Recall                          │           71.0% │
+│ Mean Reciprocal Rank (MRR)      │           0.943 │
+│ NDCG@5                            │           0.377 │
+│ Keyword Hit Rate (Top-1)        │           48.0% │
+│ Page Accuracy                   │           28.7% │
+└─────────────────────────────────┴─────────────────┘
+
+================================================================================
+                        BY DIFFICULTY LEVEL
+================================================================================
+EASY (n=6): P@K=73.3% | Recall=73.6% | MRR=0.764 | Time=1471ms
+MEDIUM (n=13): P@K=76.9% | Recall=69.9% | MRR=1.000 | Time=1183ms
+HARD (n=6): P@K=83.3% | Recall=70.8% | MRR=1.000 | Time=1215ms
+
+================================================================================
+                          BY CATEGORY
+================================================================================
+tax_rates: P@K=100.0% | Recall=75.0% (n=1)
+exemptions: P@K=60.0% | Recall=100.0% (n=1)
+effective_date: P@K=40.0% | Recall=50.0% (n=1)
+taxable_income: P@K=80.0% | Recall=75.0% (n=1)
+transfer_pricing: P@K=100.0% | Recall=50.0% (n=1)
+penalties: P@K=40.0% | Recall=100.0% (n=1)
+free_zone: P@K=100.0% | Recall=100.0% (n=1)
+tax_group: P@K=100.0% | Recall=100.0% (n=1)
+losses: P@K=80.0% | Recall=100.0% (n=1)
+exempt_income: P@K=20.0% | Recall=50.0% (n=1)
+registration: P@K=40.0% | Recall=66.7% (n=1)
+tax_returns: P@K=100.0% | Recall=75.0% (n=1)
+permanent_establishment: P@K=100.0% | Recall=50.0% (n=1)
+related_parties: P@K=100.0% | Recall=100.0% (n=1)
+small_business: P@K=100.0% | Recall=75.0% (n=1)
+withholding_tax: P@K=40.0% | Recall=50.0% (n=1)
+anti_abuse: P@K=40.0% | Recall=50.0% (n=1)
+accounting: P@K=80.0% | Recall=33.3% (n=1)
+business_restructuring: P@K=80.0% | Recall=75.0% (n=1)
+deductions: P@K=80.0% | Recall=50.0% (n=1)
+interest_limitation: P@K=80.0% | Recall=75.0% (n=1)
+tax_period: P@K=100.0% | Recall=75.0% (n=1)
+clarifications: P@K=100.0% | Recall=75.0% (n=1)
+foreign_tax_credit: P@K=100.0% | Recall=75.0% (n=1)
+natural_person: P@K=80.0% | Recall=50.0% (n=1)
+
+================================================================================
+                         COST ANALYSIS
+================================================================================
+Total Tokens Used: 242
+Cost per Query: $0.00000019
+Projected Cost per 1000 Queries: $0.0002
+
+================================================================================
+                      SYSTEM CONFIGURATION
+================================================================================
+Embedding Model: text-embedding-3-small (1536 dims)
+Search Type: Hybrid (Semantic + Keyword with RRF)
+Top-K Results: 5
+Database: Supabase (pgvector)
+
+================================================================================
+                           END REPORT
+================================================================================
