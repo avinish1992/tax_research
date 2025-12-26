@@ -10,8 +10,13 @@ const path = require('path')
 const EMBEDDING_MODEL = 'text-embedding-3-small'
 const OPENAI_EMBEDDING_URL = 'https://api.openai.com/v1/embeddings'
 const LLM_API_URL = 'https://apps.abacus.ai/v1/chat/completions'
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''REDACTED''
-const ABACUSAI_API_KEY = process.env.ABACUSAI_API_KEY || ''REDACTED''
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY
+const ABACUSAI_API_KEY = process.env.ABACUSAI_API_KEY
+
+if (!OPENAI_API_KEY) {
+  console.error('Error: OPENAI_API_KEY environment variable is required')
+  process.exit(1)
+}
 
 // Helper: Generate embedding using OpenAI
 async function generateEmbedding(text) {
