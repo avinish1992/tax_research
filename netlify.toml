@@ -7,16 +7,9 @@
   NODE_VERSION = "20"
   NPM_FLAGS = "--legacy-peer-deps"
 
-# Next.js plugin for Netlify (auto-installed)
+# Next.js plugin for Netlify (handles SSR, routing, etc.)
 [[plugins]]
   package = "@netlify/plugin-nextjs"
-
-# Redirects for SPA routing
-[[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
-  conditions = {Role = ["admin"]}
 
 # Headers for security
 [[headers]]
@@ -25,6 +18,9 @@
     X-Frame-Options = "DENY"
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
+    X-XSS-Protection = "1; mode=block"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
 
 # Environment-specific settings
 [context.production]
@@ -35,3 +31,8 @@
 
 [context.branch-deploy]
   command = "npm run build"
+
+# Functions configuration
+[functions]
+  directory = ".netlify/functions"
+  node_bundler = "esbuild"

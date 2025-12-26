@@ -53,3 +53,20 @@ documents/
 # Logs
 logs/
 *.log
+
+# Dev artifacts (evaluation scripts, test results, screenshots)
+dev-artifacts/
+
+# Test result files
+*-test-*.json
+*-results.json
+test-results.json
+
+# Playwright screenshots
+.playwright-mcp/
+
+# Deno
+deno.lock
+
+# Upload logs
+upload_test_log.md

@@ -32,7 +32,7 @@ export async function downloadFile(storagePath: string): Promise<string> {
 
   const { data, error } = await supabase.storage
     .from(BUCKET_NAME)
-    .createSignedUrl(storagePath, 3600) // 1 hour expiry
+    .createSignedUrl(storagePath, 86400) // 24 hour expiry
 
   if (error) {
     console.error('Supabase storage download error:', error)

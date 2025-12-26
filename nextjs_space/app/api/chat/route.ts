@@ -7,6 +7,7 @@ import {
   createMessage,
   updateChatSessionTimestamp,
 } from '@/lib/supabase-db'
+import { createClient } from '@/utils/supabase/server'
 
 export const dynamic = 'force-dynamic'
 
@@ -43,21 +44,21 @@ export async function POST(request: NextRequest) {
     })
 
     // Generate embedding for user query and find relevant chunks using hybrid search
-    let relevantChunks: Array<{ content: string; fileName: string; pageNumber: number | null; score: number }> = []
-    
+    let relevantChunks: Array<{ content: string; fileName: string; pageNumber: number | null; score: number; documentId: string }> = []
+
     try {
       console.log('\n' + '='.repeat(80))
       console.log('🔍 RAG RETRIEVAL PIPELINE')
       console.log('='.repeat(80))
       console.log(`Query: "${message.substring(0, 100)}${message.length > 100 ? '...' : ''}"`)
-      
+
       // Step 1: Query expansion for legal documents
       const expandedQuery = expandLegalQuery(message)
-      
+
       // Step 2: Generate embedding using real embedding model
       console.log('\n📊 Generating semantic embedding...')
       const queryEmbedding = await generateEmbedding(expandedQuery)
-      
+
       // Step 3: Hybrid search (semantic + keyword with RRF fusion)
       if (queryEmbedding && queryEmbedding.length > 0) {
         const results = await hybridSearch(
@@ -66,15 +67,16 @@ export async function POST(request: NextRequest) {
           user.id,
           10 // Top 10 chunks
         )
-        
-        // Convert to expected format with page numbers
+
+        // Convert to expected format with page numbers and documentId
         relevantChunks = results.map(r => ({
           content: r.content,
           fileName: r.fileName,
           pageNumber: r.pageNumber,
           score: r.score,
+          documentId: r.documentId,
         }))
-        
+
         console.log('\n✅ RAG retrieval complete')
         console.log('='.repeat(80) + '\n')
       }
@@ -84,15 +86,63 @@ export async function POST(request: NextRequest) {
       // Continue without RAG context if embedding fails
     }
 
-    // Build context from relevant chunks
+    // Build context from relevant chunks with numbered sources
     let contextText = ''
 
+    // Create a deduplicated list of sources for citations
+    const sourcesList: Array<{
+      index: number
+      fileName: string
+      pageNumber: number | null
+      content: string
+      documentId: string
+      fileUrl: string | null
+    }> = []
+
     if (relevantChunks.length > 0) {
-      // Format context clearly with document sources and page numbers
+      // Get unique document IDs and fetch their storage paths for PDF preview
+      const uniqueDocIds = [...new Set(relevantChunks.map(c => c.documentId))]
+      const documentUrls: Map<string, string | null> = new Map()
+
+      try {
+        const supabase = await createClient()
+
+        // Fetch documents to get storage paths
+        const { data: documents } = await supabase
+          .from('documents')
+          .select('id, storage_path')
+          .in('id', uniqueDocIds)
+
+        if (documents) {
+          // Generate signed URLs for each document (valid for 1 hour)
+          for (const doc of documents) {
+            const { data: urlData } = await supabase.storage
+              .from('documents')
+              .createSignedUrl(doc.storage_path, 3600)
+            documentUrls.set(doc.id, urlData?.signedUrl || null)
+          }
+        }
+      } catch (urlError) {
+        console.error('Error generating document URLs:', urlError)
+        // Continue without URLs - PDF preview will fall back to text view
+      }
+
+      // Format context clearly with numbered sources for citation
       contextText = '\n\n=== UPLOADED LEGAL DOCUMENTS ===\n\n'
-      relevantChunks.forEach((chunk) => {
+      relevantChunks.forEach((chunk, index) => {
+        const sourceNum = index + 1
         const pageInfo = chunk.pageNumber ? ` (Page ${chunk.pageNumber})` : ''
-        contextText += `[Source: ${chunk.fileName}${pageInfo}]\n${chunk.content}\n\n---\n\n`
+        contextText += `[${sourceNum}] Source: ${chunk.fileName}${pageInfo}\n${chunk.content}\n\n---\n\n`
+
+        // Add to sources list for frontend with documentId and fileUrl
+        sourcesList.push({
+          index: sourceNum,
+          fileName: chunk.fileName,
+          pageNumber: chunk.pageNumber,
+          content: chunk.content.substring(0, 500) + (chunk.content.length > 500 ? '...' : ''),
+          documentId: chunk.documentId,
+          fileUrl: documentUrls.get(chunk.documentId) || null
+        })
       })
       contextText += '=== END OF DOCUMENTS ===\n\n'
     }
@@ -105,11 +155,20 @@ YOUR CAPABILITIES:
 - You can answer questions about the uploaded legal documents when relevant
 - You can help users understand complex legal language in their documents
 
-GUIDELINES:
+CITATION GUIDELINES (IMPORTANT):
+When referencing information from the provided documents, you MUST use inline numbered citations in the format [1], [2], etc.
+- Each citation number corresponds to the source number shown in the document context (e.g., "[1] Source: ...")
+- Place the citation immediately after the fact or claim it supports
+- Example: "The corporate tax rate is 9% for income above AED 375,000 [2]."
+- You can cite multiple sources for one statement: "Small businesses may qualify for relief [1][3]."
+- Only cite sources that are actually provided in the context below
+- If you mention a page number, include it naturally: "According to the guidelines on Page 19 [1]..."
+
+GENERAL GUIDELINES:
 1. Be conversational and helpful. If the user says "hello" or "are you there?", respond naturally - don't tell them to upload documents for a simple greeting.
 
 2. When answering questions about legal topics:
-   - If relevant document content is provided below, use it to answer and cite the source (e.g., "According to [Document Name], Page X...")
+   - If relevant document content is provided below, use it to answer WITH citations using [1], [2], etc.
    - If the documents don't contain the answer, say so honestly and offer to help with what IS in the documents
    - Never make up legal information - only cite what's actually in the provided documents
 
@@ -117,7 +176,7 @@ GUIDELINES:
 
 4. Keep responses clear and well-organized. For complex legal answers, use bullet points or numbered lists.
 
-${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use this to answer document-related questions:' : 'NOTE: No specific document content matched this query. You can still have a conversation or suggest what topics might be in the user\'s documents.'}`
+${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source numbers [1], [2], etc. when citing:' : 'NOTE: No specific document content matched this query. You can still have a conversation or suggest what topics might be in the user\'s documents.'}`
 
     const messages = [
       { role: 'system', content: systemPrompt + contextText },
@@ -185,27 +244,41 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use this to ans
     }
 
     let fullResponse = ''
-    
+
     const stream = new ReadableStream({
       async start(controller) {
         const reader = response.body!.getReader()
         const decoder = new TextDecoder()
         const encoder = new TextEncoder()
-        
+        let buffer = '' // Buffer for incomplete chunks
+
         try {
+          // Send sources metadata at the start of the stream
+          if (sourcesList.length > 0) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ sources: sourcesList })}\n\n`))
+          }
+
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
-            
-            const chunk = decoder.decode(value, { stream: true })
-            const lines = chunk.split('\n')
-            
+
+            // Append new chunk to buffer
+            buffer += decoder.decode(value, { stream: true })
+
+            // Process complete lines (ending with \n)
+            const lines = buffer.split('\n')
+            // Keep the last potentially incomplete line in buffer
+            buffer = lines.pop() || ''
+
             for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                const data = line.slice(6).trim()
+              const trimmedLine = line.trim()
+              if (!trimmedLine) continue
+
+              if (trimmedLine.startsWith('data: ')) {
+                const data = trimmedLine.slice(6).trim()
                 if (data === '[DONE]') continue
                 if (!data) continue
-                
+
                 try {
                   const parsed = JSON.parse(data)
                   const content = parsed?.choices?.[0]?.delta?.content
@@ -214,19 +287,41 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use this to ans
                     controller.enqueue(encoder.encode(`data: ${data}\n\n`))
                   }
                 } catch (e) {
-                  console.error('JSON parse error:', e, 'Data:', data)
-                  // Skip invalid JSON
+                  // JSON parse failed - likely incomplete data, skip this chunk
+                  // This can happen with malformed responses, just continue
+                  console.warn('Skipping malformed JSON chunk')
                 }
               }
             }
           }
 
-          // Save assistant message (using Supabase)
+          // Process any remaining data in buffer
+          if (buffer.trim()) {
+            const trimmedLine = buffer.trim()
+            if (trimmedLine.startsWith('data: ')) {
+              const data = trimmedLine.slice(6).trim()
+              if (data && data !== '[DONE]') {
+                try {
+                  const parsed = JSON.parse(data)
+                  const content = parsed?.choices?.[0]?.delta?.content
+                  if (content) {
+                    fullResponse += content
+                    controller.enqueue(encoder.encode(`data: ${data}\n\n`))
+                  }
+                } catch (e) {
+                  // Final chunk was incomplete, skip it
+                }
+              }
+            }
+          }
+
+          // Save assistant message (using Supabase) with sources in metadata
           if (fullResponse) {
             await createMessage({
               chatSessionId,
               role: 'assistant',
               content: fullResponse,
+              metadata: sourcesList.length > 0 ? { sources: sourcesList } : {},
             })
 
             // Update chat session timestamp (using Supabase)
