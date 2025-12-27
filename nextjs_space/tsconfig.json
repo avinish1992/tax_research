@@ -38,6 +38,8 @@
   ],
   "exclude": [
     "node_modules",
-    "_old_scripts"
+    "_old_scripts",
+    "scripts",
+    "test-infra"
   ]
 }

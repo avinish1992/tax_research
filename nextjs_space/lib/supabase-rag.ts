@@ -1,23 +1,43 @@
 /**
  * Supabase-based RAG system using pgvector for semantic search
- * Replaces the Prisma-based implementation with native PostgreSQL vector operations
- * Uses OpenAI API for embeddings
+ *
+ * EMBEDDING OPTIONS (configurable via USE_HUGGINGFACE_EMBEDDINGS):
+ * 1. Hugging Face Inference API (FREE) - all-MiniLM-L6-v2 (384 dims)
+ * 2. OpenAI API (paid) - text-embedding-3-small (1536 dims)
+ *
+ * HuggingFace is recommended for cost savings - free tier with generous limits
  */
 
 import { createClient } from '@/utils/supabase/server'
+import { InferenceClient } from '@huggingface/inference'
 
-// Embedding model configuration - Using OpenAI
-const EMBEDDING_MODEL = 'text-embedding-3-small' // 1536 dimensions
-const EMBEDDING_API_URL = 'https://api.openai.com/v1/embeddings'
+// =============================================================================
+// CONFIGURATION - Change this to switch embedding providers
+// =============================================================================
+const USE_HUGGINGFACE_EMBEDDINGS = false // OpenAI (1536 dims) - consistent with stored embeddings
+
+// Hugging Face config (FREE)
+const HF_MODEL = 'sentence-transformers/all-MiniLM-L6-v2' // 384 dimensions
+
+// OpenAI config (paid fallback)
+const OPENAI_MODEL = 'text-embedding-3-small' // 1536 dimensions
+const OPENAI_API_URL = 'https://api.openai.com/v1/embeddings'
 const MAX_TOKENS = 8191
 
-// Retrieval configuration - Optimized based on empirical testing (Dec 2025)
-// Testing showed: K=20 improves chunk found rate by 10% over K=10
-// LLM reranking provides 0% net improvement and adds 2400ms latency - disabled
-const DEFAULT_TOP_K = 50 // Increased to handle 50-chunk span questions
-const DEFAULT_MIN_SIMILARITY = 0.25 // Optimal threshold - lower to maximize recall (avg similarity ~0.65)
-const RERANK_TOP_K = 20 // Not currently used - reranking disabled
-const FINAL_TOP_K = 20 // Increased from 10 based on comparison testing
+// Search config
+const DEFAULT_TOP_K = 15
+const DEFAULT_MIN_SIMILARITY = 0.25
+const RRF_K = 60
+
+interface SearchResult {
+  content: string
+  fileName: string
+  score: number
+  chunkIndex: number
+  pageNumber: number | null
+  source: string
+  documentId: string
+}
 
 interface HybridSearchResult {
   chunk_id: string
@@ -32,130 +52,149 @@ interface HybridSearchResult {
   search_type: string
 }
 
-interface SearchResult {
-  content: string
-  fileName: string
-  score: number
-  chunkIndex: number
-  pageNumber: number | null
-  source: string
-  documentId: string
+// =============================================================================
+// EMBEDDING GENERATION
+// =============================================================================
+
+/**
+ * Generate embedding using Hugging Face Inference SDK (FREE)
+ * Uses all-MiniLM-L6-v2 model (384 dimensions)
+ *
+ * Free tier: ~30,000 requests/month
+ * Get your free API key at: https://huggingface.co/settings/tokens
+ */
+async function generateHuggingFaceEmbedding(text: string): Promise<number[]> {
+  const apiKey = process.env.HUGGINGFACE_API_KEY
+  if (!apiKey) {
+    throw new Error('HUGGINGFACE_API_KEY not configured. Get a free key at https://huggingface.co/settings/tokens')
+  }
+
+  console.log('🤗 Generating HuggingFace embedding (FREE)...')
+  const startTime = Date.now()
+
+  // Truncate text if too long (model max ~512 tokens)
+  const truncatedText = text.length > 2000 ? text.substring(0, 2000) : text
+
+  const client = new InferenceClient(apiKey)
+
+  try {
+    const output = await client.featureExtraction({
+      model: HF_MODEL,
+      inputs: truncatedText,
+      provider: 'hf-inference',
+    })
+
+    // Convert to number array - output can be nested array or flat array
+    let embedding: number[]
+    if (Array.isArray(output) && Array.isArray(output[0])) {
+      // Nested array - take mean pooling or first element
+      embedding = output[0] as number[]
+    } else if (Array.isArray(output)) {
+      embedding = output as number[]
+    } else {
+      throw new Error('Invalid embedding response from HuggingFace')
+    }
+
+    const duration = Date.now() - startTime
+    console.log(`✓ HuggingFace embedding: ${duration}ms (${embedding.length} dims)`)
+
+    return embedding
+  } catch (error: any) {
+    // Handle model loading (503) - retry once
+    if (error.message?.includes('loading') || error.message?.includes('503')) {
+      console.log('   Model loading, retrying in 2s...')
+      await new Promise(resolve => setTimeout(resolve, 2000))
+      return generateHuggingFaceEmbedding(text)
+    }
+    throw error
+  }
 }
 
 /**
- * Generate embeddings using OpenAI API
+ * Generate embedding using OpenAI API (paid fallback)
+ * Uses text-embedding-3-small (1536 dimensions)
+ */
+async function generateOpenAIEmbedding(text: string): Promise<number[]> {
+  const apiKey = process.env.OPENAI_API_KEY
+  if (!apiKey) {
+    throw new Error('OPENAI_API_KEY not configured')
+  }
+
+  console.log('🔮 Generating OpenAI embedding...')
+  const startTime = Date.now()
+
+  const maxChars = MAX_TOKENS * 4
+  const truncatedText = text.length > maxChars ? text.substring(0, maxChars) : text
+
+  const response = await fetch(OPENAI_API_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      input: truncatedText,
+    }),
+  })
+
+  if (!response.ok) {
+    const errorText = await response.text()
+    throw new Error(`OpenAI API error (${response.status}): ${errorText}`)
+  }
+
+  const data = await response.json()
+  const embedding = data?.data?.[0]?.embedding
+
+  if (!embedding || !Array.isArray(embedding)) {
+    throw new Error('Invalid embedding response from OpenAI')
+  }
+
+  const duration = Date.now() - startTime
+  console.log(`✓ OpenAI embedding: ${duration}ms (${embedding.length} dims)`)
+
+  return embedding
+}
+
+/**
+ * Main embedding function - uses configured provider
+ * Defaults to HuggingFace (FREE) unless USE_HUGGINGFACE_EMBEDDINGS is false
  */
 export async function generateEmbedding(text: string): Promise<number[]> {
   if (!text || text.trim().length === 0) {
     throw new Error('Cannot generate embedding for empty text')
   }
 
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) {
-    throw new Error('OPENAI_API_KEY not configured')
-  }
-
-  try {
-    console.log('🔮 Generating embedding for text of length:', text.length)
-
-    // Truncate if needed (rough estimate: 1 token ≈ 4 chars)
-    const maxChars = MAX_TOKENS * 4
-    const truncatedText = text.length > maxChars ? text.substring(0, maxChars) : text
-
-    const response = await fetch(EMBEDDING_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input: truncatedText,
-      }),
-    })
-
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`Embedding API error (${response.status}): ${errorText}`)
-    }
-
-    const data = await response.json()
-    const embedding = data?.data?.[0]?.embedding
-
-    if (!embedding || !Array.isArray(embedding)) {
-      throw new Error('Invalid embedding response format')
-    }
-
-    console.log('✓ Generated embedding:')
-    console.log(`  - Model: ${EMBEDDING_MODEL}`)
-    console.log(`  - Dimensions: ${embedding.length}`)
-
-    return embedding
-  } catch (error) {
-    console.error('❌ Error generating embedding:', error)
-    throw error
-  }
-}
-
-/**
- * Hybrid search using Supabase RPC function
- * Combines semantic (vector) and keyword search with RRF fusion
- */
-export async function hybridSearch(
-  query: string,
-  queryEmbedding: number[],
-  userId: string,
-  topK: number = DEFAULT_TOP_K,
-  minSimilarity: number = DEFAULT_MIN_SIMILARITY
-): Promise<SearchResult[]> {
-  console.log(`\n🔀 Hybrid Search (Supabase pgvector)`)
-  console.log(`   Query: "${query.substring(0, 100)}..."`)
-  console.log(`   User: ${userId}`)
-
-  const supabase = await createClient()
-
-  try {
-    const { data, error } = await supabase.rpc('hybrid_search', {
-      query_text: query,
-      query_embedding: JSON.stringify(queryEmbedding),
-      p_user_id: userId,
-      match_count: topK,
-      semantic_weight: 0.6,  // Slightly favor semantic for legal docs
-      keyword_weight: 0.4,
-      rrf_k: 60,
-      min_semantic_similarity: minSimilarity  // Filter low-quality results
-    })
-
-    if (error) {
-      console.error('❌ Hybrid search error:', error)
+  if (USE_HUGGINGFACE_EMBEDDINGS) {
+    try {
+      return await generateHuggingFaceEmbedding(text)
+    } catch (error) {
+      console.warn('⚠️ HuggingFace failed, falling back to OpenAI:', error)
+      // Fallback to OpenAI if HuggingFace fails
+      if (process.env.OPENAI_API_KEY) {
+        return await generateOpenAIEmbedding(text)
+      }
       throw error
     }
-
-    const results: SearchResult[] = (data as HybridSearchResult[]).map((row) => ({
-      content: row.content,
-      fileName: row.file_name,
-      score: row.rrf_score,
-      chunkIndex: row.chunk_index,
-      pageNumber: row.page_number,
-      source: row.search_type,
-      documentId: row.document_id
-    }))
-
-    console.log(`\n✓ Hybrid search complete: ${results.length} results`)
-    if (results.length > 0) {
-      console.log(`  - Top result: ${results[0].source} (score: ${results[0].score.toFixed(4)})`)
-    }
-
-    return results
-  } catch (error) {
-    console.error('❌ Supabase hybrid search failed:', error)
-    // Fallback to semantic-only search
-    return semanticSearch(queryEmbedding, userId, topK)
+  } else {
+    return await generateOpenAIEmbedding(text)
   }
 }
 
 /**
- * Semantic-only search using Supabase RPC function
+ * Get the embedding dimensions for the current provider
+ */
+export function getEmbeddingDimensions(): number {
+  return USE_HUGGINGFACE_EMBEDDINGS ? 384 : 1536
+}
+
+// =============================================================================
+// SEARCH FUNCTIONS
+// =============================================================================
+
+/**
+ * Semantic search using Supabase RPC function
+ * Automatically uses the correct search function based on embedding dimensions
  */
 export async function semanticSearch(
   queryEmbedding: number[],
@@ -163,12 +202,20 @@ export async function semanticSearch(
   topK: number = DEFAULT_TOP_K,
   minSimilarity: number = DEFAULT_MIN_SIMILARITY
 ): Promise<SearchResult[]> {
-  console.log(`🔍 Semantic Search (Supabase pgvector)`)
+  const dims = queryEmbedding.length
+  const searchFunction = dims === 384 ? 'semantic_search_local' : 'semantic_search'
+
+  console.log(`🔍 Semantic Search (${dims} dims, ${searchFunction})`)
 
   const supabase = await createClient()
 
-  const { data, error } = await supabase.rpc('semantic_search', {
-    query_embedding: JSON.stringify(queryEmbedding),
+  // Format embedding based on function expectation
+  const embeddingParam = dims === 384
+    ? `[${queryEmbedding.join(',')}]`  // Local format
+    : JSON.stringify(queryEmbedding)    // OpenAI format
+
+  const { data, error } = await supabase.rpc(searchFunction, {
+    query_embedding: embeddingParam,
     p_user_id: userId,
     match_count: topK,
     min_similarity: minSimilarity
@@ -189,8 +236,71 @@ export async function semanticSearch(
     documentId: row.document_id
   }))
 
-  console.log(`✓ Semantic search complete: ${results.length} results`)
+  console.log(`✓ Semantic search: ${results.length} results`)
   return results
+}
+
+/**
+ * Hybrid search using Supabase RPC function
+ * Combines semantic (vector) and keyword search with RRF fusion
+ */
+export async function hybridSearch(
+  query: string,
+  queryEmbedding: number[],
+  userId: string,
+  topK: number = DEFAULT_TOP_K,
+  minSimilarity: number = DEFAULT_MIN_SIMILARITY
+): Promise<SearchResult[]> {
+  const dims = queryEmbedding.length
+  // Use appropriate hybrid search function based on embedding dimensions
+  const searchFunction = dims === 384 ? 'hybrid_search_local' : 'hybrid_search'
+  console.log(`\n🔀 Hybrid Search (${dims} dims, ${searchFunction})`)
+  console.log(`   Query: "${query.substring(0, 100)}..."`)
+
+  const supabase = await createClient()
+
+  // Try hybrid search first
+  try {
+    const embeddingParam = dims === 384
+      ? `[${queryEmbedding.join(',')}]`
+      : JSON.stringify(queryEmbedding)
+
+    const { data, error } = await supabase.rpc(searchFunction, {
+      query_text: query,
+      query_embedding: embeddingParam,
+      p_user_id: userId,
+      match_count: topK,
+      semantic_weight: 0.6,
+      keyword_weight: 0.4,
+      rrf_k: RRF_K,
+      min_semantic_similarity: minSimilarity
+    })
+
+    if (error) {
+      console.warn('❌ Hybrid search error, falling back to semantic:', error.message)
+      return semanticSearch(queryEmbedding, userId, topK, minSimilarity)
+    }
+
+    const results: SearchResult[] = (data as HybridSearchResult[]).map((row) => ({
+      content: row.content,
+      fileName: row.file_name,
+      score: row.rrf_score,
+      chunkIndex: row.chunk_index,
+      pageNumber: row.page_number,
+      source: row.search_type,
+      documentId: row.document_id
+    }))
+
+    console.log(`✓ Hybrid search: ${results.length} results`)
+    if (results.length > 0) {
+      console.log(`  Top: ${results[0].source} (score: ${results[0].score.toFixed(4)})`)
+    }
+
+    return results
+  } catch (error) {
+    console.error('❌ Hybrid search failed:', error)
+    return semanticSearch(queryEmbedding, userId, topK, minSimilarity)
+  }
 }
 
 /**
@@ -224,11 +334,10 @@ export function expandLegalQuery(query: string): string {
 
 /**
  * Expand search results with parent context (adjacent chunks)
- * Helps with multi-hop questions by providing more context around retrieved chunks
  */
 export async function expandWithParentContext(
   searchResults: SearchResult[],
-  userId: string,
+  _userId: string,
   window: number = 2
 ): Promise<SearchResult[]> {
   if (searchResults.length === 0) return searchResults
@@ -238,16 +347,14 @@ export async function expandWithParentContext(
   const seenContexts = new Set<string>()
 
   for (const result of searchResults) {
-    // Create a key to detect overlapping expansions
     const contextKey = `${result.fileName}:${Math.floor(result.chunkIndex / (window * 2))}`
     if (seenContexts.has(contextKey)) continue
     seenContexts.add(contextKey)
 
-    // Fetch adjacent chunks from the same document
     const { data: adjacentChunks, error } = await supabase
       .from('document_chunks')
       .select('content, chunk_index')
-      .eq('document_id', result.fileName) // Note: need document_id from search
+      .eq('document_id', result.documentId)
       .gte('chunk_index', Math.max(0, result.chunkIndex - window))
       .lte('chunk_index', result.chunkIndex + window)
       .order('chunk_index', { ascending: true })
@@ -257,7 +364,6 @@ export async function expandWithParentContext(
       continue
     }
 
-    // Combine adjacent chunks into expanded content
     const expandedContent = adjacentChunks
       .map((c: { content: string }) => c.content)
       .join('\n\n')
@@ -268,12 +374,12 @@ export async function expandWithParentContext(
     })
   }
 
-  console.log(`✓ Expanded ${searchResults.length} results to ${expandedResults.length} with parent context (window=${window})`)
+  console.log(`✓ Expanded ${searchResults.length} → ${expandedResults.length} with context`)
   return expandedResults
 }
 
 /**
- * Store document chunk with embedding in Supabase
+ * Store document chunk with embedding
  */
 export async function storeChunk(
   documentId: string,
@@ -283,17 +389,26 @@ export async function storeChunk(
   pageNumber: number | null
 ): Promise<void> {
   const supabase = await createClient()
+  const dims = embedding.length
+
+  const insertData: Record<string, any> = {
+    document_id: documentId,
+    content,
+    chunk_index: chunkIndex,
+    page_number: pageNumber,
+    metadata: {}
+  }
+
+  // Store in appropriate column based on dimensions
+  if (dims === 384) {
+    insertData.embedding_local = `[${embedding.join(',')}]`
+  } else {
+    insertData.embedding = JSON.stringify(embedding)
+  }
 
   const { error } = await supabase
     .from('document_chunks')
-    .insert({
-      document_id: documentId,
-      content,
-      embedding: JSON.stringify(embedding),
-      chunk_index: chunkIndex,
-      page_number: pageNumber,
-      metadata: {}
-    })
+    .insert(insertData)
 
   if (error) {
     console.error('❌ Failed to store chunk:', error)

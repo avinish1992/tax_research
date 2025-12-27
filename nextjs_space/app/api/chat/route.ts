@@ -11,9 +11,144 @@ import { createClient } from '@/utils/supabase/server'
 
 export const dynamic = 'force-dynamic'
 
+// Latency metrics interface
+interface LatencyMetrics {
+  requestId: string
+  timestamp: string
+  // Timing breakdown (all in ms)
+  authTimeMs: number
+  sessionFetchTimeMs: number
+  ragTotalTimeMs: number
+  ragEmbeddingTimeMs: number
+  ragSearchTimeMs: number
+  llmTtftMs: number           // Time to First Token
+  llmStreamDurationMs: number // Time from first to last token
+  llmTotalTimeMs: number      // Total LLM call time
+  totalRequestTimeMs: number  // End-to-end time
+  // Token metrics
+  tokenCount: number
+  tokensPerSecond: number
+  responseCharCount: number
+  // Context info
+  queryLength: number
+  ragChunksRetrieved: number
+  model: string
+  userId: string
+}
+
+function generateRequestId(): string {
+  return `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
+}
+
+/**
+ * Detect if user wants exact quotes/verbatim text from documents
+ * Returns true for requests like "quote Article 50", "exact text of...", "verbatim"
+ */
+function isQuoteModeRequest(message: string): boolean {
+  const lowerMessage = message.toLowerCase()
+  const quoteIndicators = [
+    'quote',
+    'exact text',
+    'verbatim',
+    'word for word',
+    'exact wording',
+    'cite exactly',
+    'full text of',
+    'complete text',
+    'actual text',
+    'original text',
+    'as written',
+    'copy of',
+  ]
+  return quoteIndicators.some(indicator => lowerMessage.includes(indicator))
+}
+
+/**
+ * Detect if query is a follow-up that needs context enrichment
+ * Returns true for vague follow-ups like "what about this", "tell me more", "implications"
+ */
+function isFollowUpQuery(message: string): boolean {
+  const lowerMessage = message.toLowerCase()
+  const followUpIndicators = [
+    'this',
+    'that',
+    'it',
+    'more about',
+    'tell me more',
+    'explain more',
+    'dive deeper',
+    'implications',
+    'what about',
+    'how about',
+    'can you explain',
+    'elaborate',
+  ]
+  return followUpIndicators.some(indicator => lowerMessage.includes(indicator)) &&
+    message.length < 100 // Short messages are likely follow-ups
+}
+
+/**
+ * Enrich a follow-up query with context from previous messages
+ * Extracts key entities (Article X, legal concepts) from recent messages
+ */
+function enrichQueryWithContext(
+  message: string,
+  previousMessages: Array<{ role: string; content: string }>
+): string {
+  // Get last few assistant/user exchanges to find context
+  const recentContext = previousMessages
+    .slice(-4) // Last 4 messages
+    .map(m => m.content)
+    .join(' ')
+
+  // Extract key entities from context
+  const entities: string[] = []
+
+  // Find Article references
+  const articleMatches = recentContext.matchAll(/Article\s+(\d+)/gi)
+  for (const match of articleMatches) {
+    entities.push(`Article ${match[1]}`)
+  }
+
+  // Find legal concepts mentioned
+  const legalConcepts = ['GAAR', 'anti-abuse', 'transfer pricing', 'withholding', 'corporate tax', 'Free Zone']
+  legalConcepts.forEach(concept => {
+    if (recentContext.toLowerCase().includes(concept.toLowerCase())) {
+      entities.push(concept)
+    }
+  })
+
+  // Find document names mentioned
+  const docMatches = recentContext.matchAll(/Federal\s+Decree[- ]Law(?:\s+No\.?)?\s*(\d+)?/gi)
+  for (const match of docMatches) {
+    entities.push(match[0])
+  }
+
+  if (entities.length > 0) {
+    const uniqueEntities = [...new Set(entities)]
+    const contextPrefix = `Regarding ${uniqueEntities.slice(0, 3).join(', ')}: `
+    console.log(`📝 Query enriched with context: "${contextPrefix}${message}"`)
+    return contextPrefix + message
+  }
+
+  return message
+}
+
 export async function POST(request: NextRequest) {
+  const requestStartTime = Date.now()
+  const requestId = generateRequestId()
+
+  // Initialize metrics object
+  const metrics: Partial<LatencyMetrics> = {
+    requestId,
+    timestamp: new Date().toISOString(),
+  }
+
   try {
+    // === AUTH TIMING ===
+    const authStartTime = Date.now()
     const user = await getAuthenticatedUser()
+    metrics.authTimeMs = Date.now() - authStartTime
 
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -29,15 +164,20 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Verify chat session belongs to user (using Supabase)
+    metrics.queryLength = message.length
+    metrics.userId = user.id
+
+    // === SESSION FETCH TIMING ===
+    const sessionFetchStartTime = Date.now()
     const chatSession = await getChatSessionWithMessages(chatSessionId, user.id, 10)
+    metrics.sessionFetchTimeMs = Date.now() - sessionFetchStartTime
 
     if (!chatSession) {
       return NextResponse.json({ error: 'Chat session not found' }, { status: 404 })
     }
 
-    // Save user message (using Supabase)
-    await createMessage({
+    // Save user message (using Supabase) and capture real ID
+    const userMessage = await createMessage({
       chatSessionId,
       role: 'user',
       content: message,
@@ -46,27 +186,44 @@ export async function POST(request: NextRequest) {
     // Generate embedding for user query and find relevant chunks using hybrid search
     let relevantChunks: Array<{ content: string; fileName: string; pageNumber: number | null; score: number; documentId: string }> = []
 
+    // === RAG TIMING ===
+    const ragStartTime = Date.now()
+    metrics.ragEmbeddingTimeMs = 0
+    metrics.ragSearchTimeMs = 0
+
     try {
       console.log('\n' + '='.repeat(80))
-      console.log('🔍 RAG RETRIEVAL PIPELINE')
+      console.log(`🔍 RAG RETRIEVAL PIPELINE [${requestId}]`)
       console.log('='.repeat(80))
       console.log(`Query: "${message.substring(0, 100)}${message.length > 100 ? '...' : ''}"`)
 
+      // Step 0: Enrich follow-up queries with conversational context
+      let ragQuery = message
+      if (isFollowUpQuery(message) && chatSession?.messages?.length > 0) {
+        ragQuery = enrichQueryWithContext(message, chatSession.messages)
+      }
+
       // Step 1: Query expansion for legal documents
-      const expandedQuery = expandLegalQuery(message)
+      const expandedQuery = expandLegalQuery(ragQuery)
 
       // Step 2: Generate embedding using real embedding model
       console.log('\n📊 Generating semantic embedding...')
+      const embeddingStartTime = Date.now()
       const queryEmbedding = await generateEmbedding(expandedQuery)
+      metrics.ragEmbeddingTimeMs = Date.now() - embeddingStartTime
+      console.log(`   Embedding generated in ${metrics.ragEmbeddingTimeMs}ms`)
 
       // Step 3: Hybrid search (semantic + keyword with RRF fusion)
       if (queryEmbedding && queryEmbedding.length > 0) {
+        const searchStartTime = Date.now()
         const results = await hybridSearch(
           expandedQuery,
           queryEmbedding,
           user.id,
           10 // Top 10 chunks
         )
+        metrics.ragSearchTimeMs = Date.now() - searchStartTime
+        console.log(`   Hybrid search completed in ${metrics.ragSearchTimeMs}ms`)
 
         // Convert to expected format with page numbers and documentId
         relevantChunks = results.map(r => ({
@@ -85,6 +242,9 @@ export async function POST(request: NextRequest) {
       console.log('   Continuing without RAG context...\n')
       // Continue without RAG context if embedding fails
     }
+
+    metrics.ragTotalTimeMs = Date.now() - ragStartTime
+    metrics.ragChunksRetrieved = relevantChunks.length
 
     // Build context from relevant chunks with numbered sources
     let contextText = ''
@@ -147,13 +307,24 @@ export async function POST(request: NextRequest) {
       contextText += '=== END OF DOCUMENTS ===\n\n'
     }
 
+    // Detect if user wants exact quotes
+    const quoteMode = isQuoteModeRequest(message)
+
     // Single unified system prompt that handles all cases naturally
-    const systemPrompt = `You are a helpful legal AI assistant. You have access to the user's uploaded legal documents which are provided below (if any).
+    const systemPrompt = `You are a helpful legal AI assistant specialized in UAE Corporate Tax Law. You have access to the user's uploaded legal documents which are provided below (if any).
+
+SCOPE & GUARDRAILS (IMPORTANT):
+- Your expertise is LIMITED to UAE Corporate Tax Law and related legal/tax matters
+- You can ONLY answer questions based on the uploaded documents OR general legal/tax topics within your domain
+- For questions OUTSIDE your scope (recipes, coding, entertainment, etc.): Politely redirect to tax-related queries
+- NEVER provide answers from general knowledge on non-legal topics
+- If asked to do something potentially harmful, unethical, or illegal: Refuse clearly and explain why
 
 YOUR CAPABILITIES:
-- You can have natural conversations and respond to greetings, questions about yourself, and general chat
-- You can answer questions about the uploaded legal documents when relevant
-- You can help users understand complex legal language in their documents
+- Answer questions about UAE Corporate Tax Law documents
+- Explain tax regulations, articles, and legal provisions
+- Help users understand compliance requirements
+- Respond to greetings and clarifying questions naturally
 
 CITATION GUIDELINES (IMPORTANT):
 When referencing information from the provided documents, you MUST use inline numbered citations in the format [1], [2], etc.
@@ -164,19 +335,37 @@ When referencing information from the provided documents, you MUST use inline nu
 - Only cite sources that are actually provided in the context below
 - If you mention a page number, include it naturally: "According to the guidelines on Page 19 [1]..."
 
-GENERAL GUIDELINES:
-1. Be conversational and helpful. If the user says "hello" or "are you there?", respond naturally - don't tell them to upload documents for a simple greeting.
+RESPONSE GUIDELINES:
+1. For greetings (hello, hi, etc.): Respond naturally and briefly mention you can help with UAE tax questions.
 
-2. When answering questions about legal topics:
-   - If relevant document content is provided below, use it to answer WITH citations using [1], [2], etc.
-   - If the documents don't contain the answer, say so honestly and offer to help with what IS in the documents
-   - Never make up legal information - only cite what's actually in the provided documents
+2. For legal/tax questions WITH document context:
+   - Answer using the provided documents WITH citations [1], [2], etc.
+   - Be accurate and specific to the source material
 
-3. For general questions about what you can do or the documents available, be helpful and informative.
+3. For legal/tax questions WITHOUT document context:
+   - Say "I don't have specific information about that in the uploaded documents."
+   - Suggest uploading relevant documents OR rephrasing the question
+   - Do NOT make up legal information
 
-4. Keep responses clear and well-organized. For complex legal answers, use bullet points or numbered lists.
+4. For OFF-TOPIC questions (non-legal/non-tax):
+   - Politely decline: "I'm specialized in UAE Corporate Tax Law. I can help you with tax-related questions instead."
+   - Do NOT answer from general knowledge on unrelated topics
 
-${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source numbers [1], [2], etc. when citing:' : 'NOTE: No specific document content matched this query. You can still have a conversation or suggest what topics might be in the user\'s documents.'}`
+5. Keep responses clear and well-organized. Use bullet points for complex legal answers.
+
+${quoteMode ? `
+QUOTE MODE ACTIVE - The user wants exact text from documents:
+- Present the most relevant document excerpts as block quotes using markdown (> prefix)
+- Format each quote with its source reference immediately after
+- Example format:
+  > "This is the exact text from the document..."
+  — Source: Document Name [1], Page X
+
+- Include multiple relevant excerpts if the content spans several sections
+- Preserve the original formatting and punctuation
+- If the exact requested text isn't found, quote the closest relevant content and explain
+` : ''}
+${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source numbers [1], [2], etc. when citing:' : 'NOTE: No relevant documents found for this query. If this is a tax-related question, suggest the user upload relevant documents or rephrase. If off-topic, politely redirect.'}`
 
     const messages = [
       { role: 'system', content: systemPrompt + contextText },
@@ -198,7 +387,11 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
 
     // Use OpenAI models
     const selectedModel = model || chatSession?.model || 'gpt-4o-mini'
-    console.log(`Using model: ${selectedModel}`)
+    metrics.model = selectedModel
+    console.log(`[${requestId}] Using model: ${selectedModel}`)
+
+    // === LLM TIMING ===
+    const llmStartTime = Date.now()
 
     // Stream response from OpenAI
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -245,6 +438,11 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
 
     let fullResponse = ''
 
+    // LLM streaming metrics
+    let firstTokenTime: number | null = null
+    let lastTokenTime: number = Date.now()
+    let tokenCount = 0
+
     const stream = new ReadableStream({
       async start(controller) {
         const reader = response.body!.getReader()
@@ -283,6 +481,14 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
                   const parsed = JSON.parse(data)
                   const content = parsed?.choices?.[0]?.delta?.content
                   if (content) {
+                    // Track TTFT on first token
+                    if (!firstTokenTime) {
+                      firstTokenTime = Date.now()
+                      metrics.llmTtftMs = firstTokenTime - llmStartTime
+                      console.log(`[${requestId}] ⚡ TTFT: ${metrics.llmTtftMs}ms`)
+                    }
+                    tokenCount++
+                    lastTokenTime = Date.now()
                     fullResponse += content
                     controller.enqueue(encoder.encode(`data: ${data}\n\n`))
                   }
@@ -305,6 +511,12 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
                   const parsed = JSON.parse(data)
                   const content = parsed?.choices?.[0]?.delta?.content
                   if (content) {
+                    if (!firstTokenTime) {
+                      firstTokenTime = Date.now()
+                      metrics.llmTtftMs = firstTokenTime - llmStartTime
+                    }
+                    tokenCount++
+                    lastTokenTime = Date.now()
                     fullResponse += content
                     controller.enqueue(encoder.encode(`data: ${data}\n\n`))
                   }
@@ -315,9 +527,51 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
             }
           }
 
+          // === CALCULATE FINAL METRICS ===
+          const streamEndTime = Date.now()
+          metrics.llmTotalTimeMs = streamEndTime - llmStartTime
+          metrics.llmStreamDurationMs = firstTokenTime ? lastTokenTime - firstTokenTime : 0
+          metrics.tokenCount = tokenCount
+          metrics.responseCharCount = fullResponse.length
+          metrics.tokensPerSecond = metrics.llmStreamDurationMs > 0
+            ? (tokenCount / (metrics.llmStreamDurationMs / 1000))
+            : 0
+          metrics.totalRequestTimeMs = streamEndTime - requestStartTime
+
+          // === LOG COMPREHENSIVE METRICS ===
+          console.log('\n' + '='.repeat(80))
+          console.log(`📊 LATENCY METRICS [${requestId}]`)
+          console.log('='.repeat(80))
+          console.log(`Timestamp:        ${metrics.timestamp}`)
+          console.log(`User:             ${metrics.userId}`)
+          console.log(`Model:            ${metrics.model}`)
+          console.log(`Query Length:     ${metrics.queryLength} chars`)
+          console.log('')
+          console.log('⏱️  TIMING BREAKDOWN:')
+          console.log(`   Auth:          ${metrics.authTimeMs}ms`)
+          console.log(`   Session Fetch: ${metrics.sessionFetchTimeMs}ms`)
+          console.log(`   RAG Total:     ${metrics.ragTotalTimeMs}ms`)
+          console.log(`     - Embedding: ${metrics.ragEmbeddingTimeMs}ms`)
+          console.log(`     - Search:    ${metrics.ragSearchTimeMs}ms`)
+          console.log(`   LLM Total:     ${metrics.llmTotalTimeMs}ms`)
+          console.log(`     - TTFT:      ${metrics.llmTtftMs}ms`)
+          console.log(`     - Streaming: ${metrics.llmStreamDurationMs}ms`)
+          console.log('')
+          console.log('📈 RESPONSE METRICS:')
+          console.log(`   RAG Chunks:    ${metrics.ragChunksRetrieved}`)
+          console.log(`   Tokens:        ${metrics.tokenCount}`)
+          console.log(`   Throughput:    ${metrics.tokensPerSecond?.toFixed(1)} tok/s`)
+          console.log(`   Response:      ${metrics.responseCharCount} chars`)
+          console.log('')
+          console.log(`⚡ TOTAL TIME:    ${metrics.totalRequestTimeMs}ms`)
+          console.log('='.repeat(80) + '\n')
+
+          // Also log as JSON for structured parsing
+          console.log(`[METRICS_JSON] ${JSON.stringify(metrics)}`)
+
           // Save assistant message (using Supabase) with sources in metadata
           if (fullResponse) {
-            await createMessage({
+            const assistantMessage = await createMessage({
               chatSessionId,
               role: 'assistant',
               content: fullResponse,
@@ -326,6 +580,14 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
 
             // Update chat session timestamp (using Supabase)
             await updateChatSessionTimestamp(chatSessionId)
+
+            // Send real message IDs back to frontend for feedback functionality
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              messageIds: {
+                userMessageId: userMessage.id,
+                assistantMessageId: assistantMessage.id,
+              }
+            })}\n\n`))
           }
 
         } catch (error) {
