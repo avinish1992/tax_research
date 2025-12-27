@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import ReactMarkdown from 'react-markdown'
 import { useSidebar } from '@/components/sidebar-context'
+import { FeedbackButtons } from '@/components/feedback-buttons'
 
 interface UploadingFile {
   name: string
@@ -251,6 +252,21 @@ function ChatContent() {
                 throw new Error(parsed.error)
               }
               if (parsed.sources) sources = parsed.sources
+              // Handle real message IDs from backend (for feedback functionality)
+              if (parsed.messageIds) {
+                const { userMessageId, assistantMessageId } = parsed.messageIds
+                setMessages((prev) =>
+                  prev.map((msg) => {
+                    if (msg.id === tempUserMsgId) {
+                      return { ...msg, id: userMessageId }
+                    }
+                    if (msg.id === tempAssistantMsgId) {
+                      return { ...msg, id: assistantMessageId }
+                    }
+                    return msg
+                  })
+                )
+              }
               const content = parsed?.choices?.[0]?.delta?.content
               if (content) {
                 assistantResponse += content
@@ -430,6 +446,7 @@ function ChatContent() {
   }, [])
 
   // Render text with clickable citations [1], [2], etc. - Enterprise superscript style
+  // FIX: Use stable keys and proper event handling to ensure clicks work during streaming
   const renderTextWithCitations = useCallback((text: string, sources: Source[]) => {
     // Split text by citation pattern [1], [2], etc.
     const parts = text.split(/(\[\d+\])/g)
@@ -442,8 +459,13 @@ function ChatContent() {
         if (source) {
           return (
             <button
-              key={i}
-              onClick={() => handleCitationClick(sourceIndex, sources)}
+              key={`cite-${sourceIndex}-${i}`}
+              type="button"
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                handleCitationClick(sourceIndex, sources)
+              }}
               className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium bg-primary/10 text-primary hover:bg-primary/20 rounded-md transition-colors cursor-pointer align-super -ml-0.5 mr-0.5 border border-primary/20 hover:border-primary/40"
               title={`${source.fileName}${source.pageNumber ? ` • Page ${source.pageNumber}` : ''}`}
             >
@@ -451,10 +473,52 @@ function ChatContent() {
             </button>
           )
         }
+        // Citation without source yet (during streaming) - show as pending style
+        return (
+          <span
+            key={`pending-${sourceIndex}-${i}`}
+            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium bg-muted text-muted-foreground rounded-md align-super -ml-0.5 mr-0.5 border border-border"
+          >
+            {sourceIndex}
+          </span>
+        )
       }
-      return part
+      // Wrap plain text in span for consistent React element types
+      return part ? <span key={`txt-${i}`}>{part}</span> : null
     })
   }, [handleCitationClick])
+
+  // Recursively process React children to find and replace citations in all text nodes
+  const processChildrenForCitations = useCallback((children: React.ReactNode, sources: Source[], keyPrefix: string = ''): React.ReactNode => {
+    if (!sources.length) return children
+
+    // Handle null/undefined
+    if (children === null || children === undefined) return children
+
+    // Handle string - convert citations to buttons
+    if (typeof children === 'string') {
+      return renderTextWithCitations(children, sources)
+    }
+
+    // Handle array of children
+    if (Array.isArray(children)) {
+      return children.map((child, i) => processChildrenForCitations(child, sources, `${keyPrefix}-${i}`))
+    }
+
+    // Handle React element - clone with processed children
+    if (React.isValidElement(children)) {
+      const element = children as React.ReactElement<{ children?: React.ReactNode }>
+      if (element.props.children) {
+        return React.cloneElement(element, {
+          ...element.props,
+          key: element.key || `${keyPrefix}-elem`,
+          children: processChildrenForCitations(element.props.children, sources, `${keyPrefix}-child`)
+        } as React.HTMLAttributes<HTMLElement>)
+      }
+    }
+
+    return children
+  }, [renderTextWithCitations])
 
   // Renumber citations sequentially (e.g., [2], [5], [7] → [1], [2], [3])
   const renumberCitations = useCallback((content: string, sources: Source[]): { content: string; sources: Source[]; indexMap: Map<number, number> } => {
@@ -620,37 +684,16 @@ function ChatContent() {
                         <div className={`prose prose-neutral dark:prose-invert max-w-none text-foreground leading-relaxed ${showSourcesPanel ? 'prose-sm' : ''}`}>
                           <ReactMarkdown
                             components={{
-                              h1: ({ children }) => <h1 className="text-xl font-semibold mt-4 mb-2">{children}</h1>,
-                              h2: ({ children }) => <h2 className="text-lg font-semibold mt-3 mb-2">{children}</h2>,
-                              h3: ({ children }) => <h3 className="text-base font-semibold mt-3 mb-1">{children}</h3>,
-                              p: ({ children }) => {
-                                // Process children to find and replace citations
-                                const processChild = (child: React.ReactNode): React.ReactNode => {
-                                  if (typeof child === 'string' && displaySources.length) {
-                                    return renderTextWithCitations(child, displaySources)
-                                  }
-                                  return child
-                                }
-                                const processedChildren = Array.isArray(children)
-                                  ? children.map(processChild)
-                                  : processChild(children)
-                                return <p className="mb-3 last:mb-0">{processedChildren}</p>
-                              },
+                              h1: ({ children }) => <h1 className="text-xl font-semibold mt-4 mb-2">{processChildrenForCitations(children, displaySources, 'h1')}</h1>,
+                              h2: ({ children }) => <h2 className="text-lg font-semibold mt-3 mb-2">{processChildrenForCitations(children, displaySources, 'h2')}</h2>,
+                              h3: ({ children }) => <h3 className="text-base font-semibold mt-3 mb-1">{processChildrenForCitations(children, displaySources, 'h3')}</h3>,
+                              p: ({ children }) => <p className="mb-3 last:mb-0">{processChildrenForCitations(children, displaySources, 'p')}</p>,
                               ul: ({ children }) => <ul className="list-disc pl-5 mb-3 space-y-1">{children}</ul>,
                               ol: ({ children }) => <ol className="list-decimal pl-5 mb-3 space-y-1">{children}</ol>,
-                              li: ({ children }) => {
-                                const processChild = (child: React.ReactNode): React.ReactNode => {
-                                  if (typeof child === 'string' && displaySources.length) {
-                                    return renderTextWithCitations(child, displaySources)
-                                  }
-                                  return child
-                                }
-                                const processedChildren = Array.isArray(children)
-                                  ? children.map(processChild)
-                                  : processChild(children)
-                                return <li className="text-foreground">{processedChildren}</li>
-                              },
-                              strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+                              li: ({ children }) => <li className="text-foreground">{processChildrenForCitations(children, displaySources, 'li')}</li>,
+                              strong: ({ children }) => <strong className="font-semibold">{processChildrenForCitations(children, displaySources, 'strong')}</strong>,
+                              em: ({ children }) => <em>{processChildrenForCitations(children, displaySources, 'em')}</em>,
+                              blockquote: ({ children }) => <blockquote className="border-l-4 border-primary/30 pl-4 italic my-3">{processChildrenForCitations(children, displaySources, 'bq')}</blockquote>,
                               code: ({ children, className }) => {
                                 const isInline = !className
                                 return isInline ? (
@@ -722,6 +765,25 @@ function ChatContent() {
                           </div>
                         )
                       })()}
+                      {/* Feedback Buttons */}
+                      {displayContent && sessionId && (
+                        <FeedbackButtons
+                          conversationId={sessionId}
+                          messageId={msg.id}
+                          query={(() => {
+                            // Find the user message that preceded this assistant message
+                            const msgIndex = messages.findIndex(m => m.id === msg.id)
+                            const prevUserMsg = messages.slice(0, msgIndex).reverse().find(m => m.role === 'user')
+                            return prevUserMsg?.content || ''
+                          })()}
+                          response={displayContent}
+                          sources={displaySources.map(s => ({
+                            fileName: s.fileName,
+                            pageNumber: s.pageNumber ?? null,
+                            chunkIndex: s.index,
+                          }))}
+                        />
+                      )}
                     </div>
                   )}
                 </div>
