@@ -252,12 +252,12 @@ test.describe('Citations and Sources', () => {
 })
 
 test.describe('API Health Checks', () => {
-  test('GET /api/documents should return 401 for unauthorized', async ({ request }) => {
-    const response = await request.get(`${BASE_URL}/api/documents`)
+  test('GET /api/docs-api should return 401 for unauthorized', async ({ request }) => {
+    const response = await request.get(`${BASE_URL}/api/docs-api`)
 
     // Should be 401 (unauthorized) not 404 (route not found)
     expect(response.status()).toBe(401)
-    console.log(`/api/documents status: ${response.status()} (expected 401)`)
+    console.log(`/api/docs-api status: ${response.status()} (expected 401)`)
   })
 
   test('GET /api/chat-sessions should return 401 for unauthorized', async ({ request }) => {

@@ -7,7 +7,7 @@
     "start": "next start",
     "lint": "next lint",
     "deploy": "./scripts/deploy.sh",
-    "deploy:verify": "curl -s -o /dev/null -w '%{http_code}' https://taxsavant-ai.netlify.app/api/documents | grep -q 401 && echo '✅ API routes working' || echo '❌ API routes NOT working (expected 401, got different status)'"
+    "deploy:verify": "curl -s -o /dev/null -w '%{http_code}' https://taxsavant-ai.netlify.app/api/docs-api | grep -q 401 && echo '✅ API routes working' || echo '❌ API routes NOT working (expected 401, got different status)'"
   },
   "devDependencies": {
     "@playwright/test": "^1.57.0",

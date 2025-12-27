@@ -106,7 +106,7 @@ function ChatContent() {
   const loadDocuments = useCallback(async (retries = 2) => {
     setIsLoadingDocs(true)
     try {
-      const response = await fetch('/api/documents')
+      const response = await fetch('/api/docs-api')
       if (!response.ok) {
         if (response.status === 401 && retries > 0) {
           setTimeout(() => loadDocuments(retries - 1), 500)
@@ -380,7 +380,7 @@ function ChatContent() {
         )
         toast.loading(`Processing ${file.name}...`, { id: toastId })
 
-        const response = await fetch('/api/documents/upload', {
+        const response = await fetch('/api/docs-api/upload', {
           method: 'POST',
           body: formData,
         })
@@ -435,7 +435,7 @@ function ChatContent() {
         setPreviewSource({ ...source, fileUrl: undefined }) // Show loading state
 
         try {
-          const response = await fetch(`/api/documents/${source.documentId}`)
+          const response = await fetch(`/api/docs-api/${source.documentId}`)
           if (response.ok) {
             const data = await response.json()
             setPreviewSource({ ...source, fileUrl: data.signedUrl })

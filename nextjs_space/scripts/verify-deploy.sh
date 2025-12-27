@@ -42,7 +42,7 @@ FAILED=0
 check_endpoint "/" "200" "Homepage" || FAILED=1
 
 # API without auth should return 401
-check_endpoint "/api/documents" "401" "API route (documents)" || FAILED=1
+check_endpoint "/api/docs-api" "401" "API route (documents)" || FAILED=1
 
 # Login page should return 200
 check_endpoint "/login" "200" "Login page" || FAILED=1

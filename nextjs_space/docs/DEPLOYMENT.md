@@ -42,7 +42,7 @@ npm run deploy:verify
 
 Expected results:
 - Homepage (`/`): 200
-- API routes (`/api/documents`): 401 (unauthorized, but route exists)
+- API routes (`/api/docs-api`): 401 (unauthorized, but route exists)
 - Login page (`/login`): 200
 
 ## Troubleshooting
@@ -82,7 +82,7 @@ Request Flow:
 │   Browser   │────▶│  Edge Function   │────▶│  Server Handler     │
 │             │     │  (Middleware)    │     │  (API Routes)       │
 └─────────────┘     │  - Session mgmt  │     │  - /api/chat        │
-                    │  - Auth redirect │     │  - /api/documents   │
+                    │  - Auth redirect │     │  - /api/docs-api    │
                     └──────────────────┘     └─────────────────────┘
 ```
 

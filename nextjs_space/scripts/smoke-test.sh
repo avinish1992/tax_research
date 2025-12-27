@@ -37,7 +37,7 @@ echo "📡 Testing API Routes..."
 echo "------------------------"
 
 # API routes should return 401 (unauthorized) not 404 (not found)
-test_endpoint "GET /api/documents" "$BASE_URL/api/documents" "401"
+test_endpoint "GET /api/docs-api" "$BASE_URL/api/docs-api" "401"
 test_endpoint "GET /api/chat-sessions" "$BASE_URL/api/chat-sessions" "401"
 test_endpoint "POST /api/chat" "$BASE_URL/api/chat" "401" "POST"
 test_endpoint "POST /api/feedback" "$BASE_URL/api/feedback" "401" "POST"
