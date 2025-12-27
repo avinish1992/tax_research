@@ -101,6 +101,42 @@ node test_rag.js
 
 ---
 
+## ⚠️ DEPLOYMENT (CRITICAL)
+
+**When user asks to deploy, ALWAYS use Git-based deployment:**
+
+```bash
+cd nextjs_space
+
+# Step 1: Commit changes
+git add -A
+git commit -m "Your commit message
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+
+# Step 2: Push to trigger Netlify build
+git push origin main
+
+# Step 3: Verify deployment
+./scripts/verify-deploy.sh
+```
+
+**⛔ NEVER use `netlify deploy --prod` directly** - it doesn't properly deploy the Next.js server handler functions, causing 404 errors on API routes.
+
+**Why Git-based deploy?**
+- Triggers full build on Netlify's servers
+- Properly bundles Next.js server handler (API routes)
+- Properly bundles edge functions (middleware/auth)
+
+**Verification checklist after deploy:**
+- `/api/documents` returns 401 (not 404)
+- Deploy summary shows "1 function deployed"
+- Deploy summary shows "1 edge function deployed"
+
+---
+
 ## Environment Variables
 
 Required in `.env`:

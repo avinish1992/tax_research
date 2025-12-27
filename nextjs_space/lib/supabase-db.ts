@@ -268,14 +268,10 @@ export async function getChatSession(
 export async function getChatSessionWithMessages(
   sessionId: string,
   userId: string,
-  messageLimit: number = 10
+  messageLimit: number = 50
 ): Promise<(ChatSession & { messages: Message[] }) | null> {
-  // Check cache first (saves ~400ms on cache hit)
-  const cacheKey = `${sessionId}:${userId}:${messageLimit}`
-  const cached = sessionCache.get(cacheKey)
-  if (cached) {
-    return cached as ChatSession & { messages: Message[] }
-  }
+  // DISABLED CACHE - was causing stale data issues on page refresh
+  // Messages change frequently, caching caused users to not see their latest messages
 
   const supabase = await createClient()
 
@@ -292,24 +288,26 @@ export async function getChatSessionWithMessages(
     throw new Error(`Failed to get chat session: ${sessionError.message}`)
   }
 
-  // Get messages
+  // Get ALL messages for this session (or up to limit)
+  // No caching - always fetch fresh data
   const { data: messages, error: messagesError } = await supabase
     .from('messages')
     .select('*')
     .eq('chat_session_id', sessionId)
     .order('created_at', { ascending: true })
-    .limit(messageLimit)
 
   if (messagesError) {
     throw new Error(`Failed to get messages: ${messagesError.message}`)
   }
 
-  const result = { ...session, messages: messages || [] }
+  // Apply limit to get the MOST RECENT messages (not oldest)
+  // If we have more messages than limit, take the last N
+  let finalMessages = messages || []
+  if (messageLimit && finalMessages.length > messageLimit) {
+    finalMessages = finalMessages.slice(-messageLimit)
+  }
 
-  // Cache the result (30 second TTL)
-  sessionCache.set(cacheKey, result)
-
-  return result
+  return { ...session, messages: finalMessages }
 }
 
 export async function getChatSessionsByUser(userId: string): Promise<ChatSession[]> {
