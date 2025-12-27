@@ -51,6 +51,7 @@ function ChatContent() {
   const [isLoadingSession, setIsLoadingSession] = useState(false)
   const [documents, setDocuments] = useState<Document[]>([])
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([])
+  const [isLoadingDocs, setIsLoadingDocs] = useState(true)
   const [showAddMenu, setShowAddMenu] = useState(false)
   const [showSourcesPanel, setShowSourcesPanel] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -102,15 +103,25 @@ function ChatContent() {
     }
   }, [])
 
-  const loadDocuments = useCallback(async () => {
+  const loadDocuments = useCallback(async (retries = 2) => {
+    setIsLoadingDocs(true)
     try {
       const response = await fetch('/api/documents')
+      if (!response.ok) {
+        if (response.status === 401 && retries > 0) {
+          setTimeout(() => loadDocuments(retries - 1), 500)
+          return
+        }
+        throw new Error('Failed to fetch documents')
+      }
       const data = await response.json()
       const docs = data?.documents ?? []
       setDocuments(docs)
       setSelectedDocIds(docs.map((d: Document) => d.id))
     } catch (error) {
       console.error('Error loading documents:', error)
+    } finally {
+      setIsLoadingDocs(false)
     }
   }, [])
 
@@ -445,67 +456,47 @@ function ChatContent() {
     }
   }, [])
 
-  // Render text with clickable citations [1], [2], etc. - Enterprise superscript style
-  // FIX: Use stable keys and proper event handling to ensure clicks work during streaming
-  const renderTextWithCitations = useCallback((text: string, sources: Source[]) => {
-    // Split text by citation pattern [1], [2], etc.
+  // Render text with clickable citations [1], [2], etc.
+  const renderTextWithCitations = (text: string, sources: Source[]) => {
     const parts = text.split(/(\[\d+\])/g)
-
     return parts.map((part, i) => {
       const match = part.match(/^\[(\d+)\]$/)
       if (match) {
         const sourceIndex = parseInt(match[1], 10)
         const source = sources.find(s => s.index === sourceIndex)
-        if (source) {
-          return (
-            <button
-              key={`cite-${sourceIndex}-${i}`}
-              type="button"
-              onClick={(e) => {
-                e.preventDefault()
-                e.stopPropagation()
-                handleCitationClick(sourceIndex, sources)
-              }}
-              className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium bg-primary/10 text-primary hover:bg-primary/20 rounded-md transition-colors cursor-pointer align-super -ml-0.5 mr-0.5 border border-primary/20 hover:border-primary/40"
-              title={`${source.fileName}${source.pageNumber ? ` • Page ${source.pageNumber}` : ''}`}
-            >
-              {sourceIndex}
-            </button>
-          )
-        }
-        // Citation without source yet (during streaming) - show as pending style
         return (
-          <span
-            key={`pending-${sourceIndex}-${i}`}
-            className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium bg-muted text-muted-foreground rounded-md align-super -ml-0.5 mr-0.5 border border-border"
+          <button
+            key={`cite-${sourceIndex}-${i}-${sources.length}`}
+            type="button"
+            disabled={!source}
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              if (source) handleCitationClick(sourceIndex, sources)
+            }}
+            className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium rounded-md align-super -ml-0.5 mr-0.5 border transition-colors ${
+              source
+                ? 'bg-primary/10 text-primary hover:bg-primary/20 border-primary/20 hover:border-primary/40 cursor-pointer'
+                : 'bg-muted text-muted-foreground border-border cursor-default'
+            }`}
+            title={source ? `${source.fileName}${source.pageNumber ? ` • Page ${source.pageNumber}` : ''}` : 'Loading...'}
           >
             {sourceIndex}
-          </span>
+          </button>
         )
       }
-      // Wrap plain text in span for consistent React element types
-      return part ? <span key={`txt-${i}`}>{part}</span> : null
+      return part || null
     })
-  }, [handleCitationClick])
+  }
 
   // Recursively process React children to find and replace citations in all text nodes
-  const processChildrenForCitations = useCallback((children: React.ReactNode, sources: Source[], keyPrefix: string = ''): React.ReactNode => {
+  const processChildrenForCitations = (children: React.ReactNode, sources: Source[], keyPrefix: string = ''): React.ReactNode => {
     if (!sources.length) return children
-
-    // Handle null/undefined
     if (children === null || children === undefined) return children
-
-    // Handle string - convert citations to buttons
-    if (typeof children === 'string') {
-      return renderTextWithCitations(children, sources)
-    }
-
-    // Handle array of children
+    if (typeof children === 'string') return renderTextWithCitations(children, sources)
     if (Array.isArray(children)) {
       return children.map((child, i) => processChildrenForCitations(child, sources, `${keyPrefix}-${i}`))
     }
-
-    // Handle React element - clone with processed children
     if (React.isValidElement(children)) {
       const element = children as React.ReactElement<{ children?: React.ReactNode }>
       if (element.props.children) {
@@ -516,9 +507,8 @@ function ChatContent() {
         } as React.HTMLAttributes<HTMLElement>)
       }
     }
-
     return children
-  }, [renderTextWithCitations])
+  }
 
   // Renumber citations sequentially (e.g., [2], [5], [7] → [1], [2], [3])
   const renumberCitations = useCallback((content: string, sources: Source[]): { content: string; sources: Source[]; indexMap: Map<number, number> } => {
@@ -630,7 +620,7 @@ function ChatContent() {
               <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
               </svg>
-              <span className="text-xs font-medium">{selectedDocIds.length}</span>
+              <span className="text-xs font-medium">{isLoadingDocs ? '•••' : selectedDocIds.length}</span>
             </button>
             {/* Copy button */}
             <button
@@ -683,6 +673,7 @@ function ChatContent() {
                       {displayContent ? (
                         <div className={`prose prose-neutral dark:prose-invert max-w-none text-foreground leading-relaxed ${showSourcesPanel ? 'prose-sm' : ''}`}>
                           <ReactMarkdown
+                            key={`md-${msg.id}-${displaySources.length}`}
                             components={{
                               h1: ({ children }) => <h1 className="text-xl font-semibold mt-4 mb-2">{processChildrenForCitations(children, displaySources, 'h1')}</h1>,
                               h2: ({ children }) => <h2 className="text-lg font-semibold mt-3 mb-2">{processChildrenForCitations(children, displaySources, 'h2')}</h2>,
