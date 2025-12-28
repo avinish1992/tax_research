@@ -245,17 +245,29 @@ function ChatContent() {
       const decoder = new TextDecoder()
       let assistantResponse = ''
       let sources: Source[] = []
+      // Buffer for handling SSE events that span multiple network chunks
+      // This is critical for production where large packets (like sources) can be split
+      let sseBuffer = ''
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
 
-        const chunk = decoder.decode(value, { stream: true })
-        const lines = chunk.split('\n')
+        // Append new data to buffer
+        sseBuffer += decoder.decode(value, { stream: true })
+
+        // Process complete SSE events (events end with \n\n or are single lines ending with \n)
+        // We split on \n and process lines, keeping incomplete data in buffer
+        const lines = sseBuffer.split('\n')
+        // Keep the last potentially incomplete line in buffer
+        sseBuffer = lines.pop() || ''
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6).trim()
+          const trimmedLine = line.trim()
+          if (!trimmedLine) continue // Skip empty lines (SSE event separators)
+
+          if (trimmedLine.startsWith('data: ')) {
+            const data = trimmedLine.slice(6).trim()
             if (data === '[DONE]' || !data) continue
 
             try {
@@ -303,7 +315,60 @@ function ChatContent() {
                 )
               }
             } catch {
-              // Skip JSON parse errors from partial data
+              // JSON parse failed - this line might be incomplete
+              // Put it back in the buffer to be processed with the next chunk
+              sseBuffer = trimmedLine + '\n' + sseBuffer
+              break // Stop processing lines, wait for more data
+            }
+          }
+        }
+      }
+
+      // Process any remaining data in the buffer
+      if (sseBuffer.trim()) {
+        const trimmedLine = sseBuffer.trim()
+        if (trimmedLine.startsWith('data: ')) {
+          const data = trimmedLine.slice(6).trim()
+          if (data && data !== '[DONE]') {
+            try {
+              const parsed = JSON.parse(data)
+              if (parsed.sources) {
+                sources = parsed.sources
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, sources }
+                      : msg
+                  )
+                )
+              }
+              if (parsed.messageIds) {
+                const { userMessageId, assistantMessageId } = parsed.messageIds
+                setMessages((prev) =>
+                  prev.map((msg) => {
+                    if (msg.id === tempUserMsgId) {
+                      return { ...msg, id: userMessageId }
+                    }
+                    if (msg.id === tempAssistantMsgId) {
+                      return { ...msg, id: assistantMessageId }
+                    }
+                    return msg
+                  })
+                )
+              }
+              const content = parsed?.choices?.[0]?.delta?.content
+              if (content) {
+                assistantResponse += content
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, content: assistantResponse, sources }
+                      : msg
+                  )
+                )
+              }
+            } catch {
+              // Final buffer was incomplete, ignore
             }
           }
         }
