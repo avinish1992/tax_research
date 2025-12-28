@@ -3,9 +3,10 @@
 import React, { useState, useEffect, useRef, Suspense, useCallback } from 'react'
 import { useSearchParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
-import ReactMarkdown from 'react-markdown'
+import { Streamdown } from 'streamdown'
 import { useSidebar } from '@/components/sidebar-context'
 import { FeedbackButtons } from '@/components/feedback-buttons'
+import { ClientOnly } from '@/components/ClientOnly'
 
 interface UploadingFile {
   name: string
@@ -671,34 +672,45 @@ function ChatContent() {
                   ) : (
                     <div className="space-y-2">
                       {displayContent ? (
-                        <div className={`prose prose-neutral dark:prose-invert max-w-none text-foreground leading-relaxed ${showSourcesPanel ? 'prose-sm' : ''}`}>
-                          <ReactMarkdown
-                            key={`md-${msg.id}-${displaySources.length}`}
-                            components={{
-                              h1: ({ children }) => <h1 className="text-xl font-semibold mt-4 mb-2">{processChildrenForCitations(children, displaySources, 'h1')}</h1>,
-                              h2: ({ children }) => <h2 className="text-lg font-semibold mt-3 mb-2">{processChildrenForCitations(children, displaySources, 'h2')}</h2>,
-                              h3: ({ children }) => <h3 className="text-base font-semibold mt-3 mb-1">{processChildrenForCitations(children, displaySources, 'h3')}</h3>,
-                              p: ({ children }) => <p className="mb-3 last:mb-0">{processChildrenForCitations(children, displaySources, 'p')}</p>,
-                              ul: ({ children }) => <ul className="list-disc pl-5 mb-3 space-y-1">{children}</ul>,
-                              ol: ({ children }) => <ol className="list-decimal pl-5 mb-3 space-y-1">{children}</ol>,
-                              li: ({ children }) => <li className="text-foreground">{processChildrenForCitations(children, displaySources, 'li')}</li>,
-                              strong: ({ children }) => <strong className="font-semibold">{processChildrenForCitations(children, displaySources, 'strong')}</strong>,
-                              em: ({ children }) => <em>{processChildrenForCitations(children, displaySources, 'em')}</em>,
-                              blockquote: ({ children }) => <blockquote className="border-l-4 border-primary/30 pl-4 italic my-3">{processChildrenForCitations(children, displaySources, 'bq')}</blockquote>,
-                              code: ({ children, className }) => {
-                                const isInline = !className
-                                return isInline ? (
-                                  <code className="bg-secondary px-1.5 py-0.5 rounded text-sm font-mono">{children}</code>
-                                ) : (
-                                  <code className="block bg-secondary p-3 rounded-lg text-sm font-mono overflow-x-auto">{children}</code>
-                                )
-                              },
-                              pre: ({ children }) => <pre className="bg-secondary p-3 rounded-lg overflow-x-auto mb-3">{children}</pre>,
-                            }}
-                          >
-                            {displayContent}
-                          </ReactMarkdown>
-                        </div>
+                        <ClientOnly
+                          fallback={
+                            <div className="flex items-center gap-1 text-muted-foreground py-2">
+                              <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </div>
+                          }
+                        >
+                          <div className={`prose prose-neutral dark:prose-invert max-w-none text-foreground leading-relaxed ${showSourcesPanel ? 'prose-sm' : ''}`}>
+                            <Streamdown
+                              key={`md-${msg.id}-${displaySources.length}`}
+                              isAnimating={isLoading && messages[messages.length - 1]?.id === msg.id}
+                              components={{
+                                h1: ({ children }) => <h1 className="text-xl font-semibold mt-4 mb-2">{processChildrenForCitations(children, displaySources, 'h1')}</h1>,
+                                h2: ({ children }) => <h2 className="text-lg font-semibold mt-3 mb-2">{processChildrenForCitations(children, displaySources, 'h2')}</h2>,
+                                h3: ({ children }) => <h3 className="text-base font-semibold mt-3 mb-1">{processChildrenForCitations(children, displaySources, 'h3')}</h3>,
+                                p: ({ children }) => <p className="mb-3 last:mb-0">{processChildrenForCitations(children, displaySources, 'p')}</p>,
+                                ul: ({ children }) => <ul className="list-disc pl-5 mb-3 space-y-1">{children}</ul>,
+                                ol: ({ children }) => <ol className="list-decimal pl-5 mb-3 space-y-1">{children}</ol>,
+                                li: ({ children }) => <li className="text-foreground">{processChildrenForCitations(children, displaySources, 'li')}</li>,
+                                strong: ({ children }) => <strong className="font-semibold">{processChildrenForCitations(children, displaySources, 'strong')}</strong>,
+                                em: ({ children }) => <em>{processChildrenForCitations(children, displaySources, 'em')}</em>,
+                                blockquote: ({ children }) => <blockquote className="border-l-4 border-primary/30 pl-4 italic my-3">{processChildrenForCitations(children, displaySources, 'bq')}</blockquote>,
+                                code: ({ children, className }) => {
+                                  const isInline = !className
+                                  return isInline ? (
+                                    <code className="bg-secondary px-1.5 py-0.5 rounded text-sm font-mono">{children}</code>
+                                  ) : (
+                                    <code className="block bg-secondary p-3 rounded-lg text-sm font-mono overflow-x-auto">{children}</code>
+                                  )
+                                },
+                                pre: ({ children }) => <pre className="bg-secondary p-3 rounded-lg overflow-x-auto mb-3">{children}</pre>,
+                              }}
+                            >
+                              {displayContent}
+                            </Streamdown>
+                          </div>
+                        </ClientOnly>
                       ) : (
                         <div className="flex items-center gap-1 text-muted-foreground py-2">
                           <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
