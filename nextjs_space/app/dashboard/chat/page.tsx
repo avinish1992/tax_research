@@ -655,10 +655,16 @@ function ChatContent() {
           ) : (
             <div className={`mx-auto px-4 py-8 space-y-6 transition-all duration-200 ${showSourcesPanel ? 'max-w-2xl' : 'max-w-3xl'}`}>
               {messages.map((msg) => {
-                // Apply sequential renumbering for assistant messages with sources
+                // Check if this message is currently streaming
+                const isStreamingMessage = isLoading && messages[messages.length - 1]?.id === msg.id
+
+                // During streaming: show all sources without filtering (citations haven't all appeared yet)
+                // After streaming: apply renumbering to only show cited sources with clean sequential numbers
                 const { content: displayContent, sources: displaySources } =
                   msg.role === 'assistant' && msg.sources?.length
-                    ? renumberCitations(msg.content, msg.sources)
+                    ? isStreamingMessage
+                      ? { content: msg.content, sources: msg.sources } // Don't filter during streaming
+                      : renumberCitations(msg.content, msg.sources)    // Filter & renumber after complete
                     : { content: msg.content, sources: msg.sources || [] }
 
                 return (
@@ -683,8 +689,8 @@ function ChatContent() {
                         >
                           <div className={`prose prose-neutral dark:prose-invert max-w-none text-foreground leading-relaxed ${showSourcesPanel ? 'prose-sm' : ''}`}>
                             <Streamdown
-                              key={`md-${msg.id}-${displaySources.length}`}
-                              isAnimating={isLoading && messages[messages.length - 1]?.id === msg.id}
+                              key={`md-${msg.id}`}
+                              isAnimating={isStreamingMessage}
                               components={{
                                 h1: ({ children }) => <h1 className="text-xl font-semibold mt-4 mb-2">{processChildrenForCitations(children, displaySources, 'h1')}</h1>,
                                 h2: ({ children }) => <h2 className="text-lg font-semibold mt-3 mb-2">{processChildrenForCitations(children, displaySources, 'h2')}</h2>,
