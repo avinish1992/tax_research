@@ -721,7 +721,9 @@ function ChatContent() {
             <div className="h-full flex flex-col items-center justify-center px-4">
               <div className="max-w-2xl w-full text-center space-y-4">
                 <h1 className="text-4xl font-semibold text-foreground">
-                  {getGreeting()}
+                  <ClientOnly fallback="Welcome">
+                    {getGreeting()}
+                  </ClientOnly>
                 </h1>
                 <p className="text-lg text-muted-foreground">
                   How can I help you today?
