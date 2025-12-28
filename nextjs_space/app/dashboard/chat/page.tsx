@@ -40,6 +40,266 @@ interface Document {
   fileSize?: number
 }
 
+// Citation popover - hover for quick preview, click for full details
+const CitationPopover = ({
+  source,
+  sourceIndex,
+  onViewDocument,
+}: {
+  source: Source | undefined
+  sourceIndex: number
+  onViewDocument: () => void
+}) => {
+  const [isOpen, setIsOpen] = useState(false)
+  const [showTooltip, setShowTooltip] = useState(false)
+  const popoverRef = useRef<HTMLDivElement>(null)
+  const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+
+  // Short preview for hover tooltip (50 chars)
+  const tooltipPreview = source?.content?.substring(0, 50) + (source?.content && source.content.length > 50 ? '...' : '')
+  // Full preview for click popover (150 chars)
+  const fullPreview = source?.content?.substring(0, 150) + (source?.content && source.content.length > 150 ? '...' : '')
+
+  // Close popover when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
+        setIsOpen(false)
+      }
+    }
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+      return () => document.removeEventListener('mousedown', handleClickOutside)
+    }
+  }, [isOpen])
+
+  // Cleanup hover timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) {
+        clearTimeout(hoverTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  const handleMouseEnter = () => {
+    if (!source || isOpen) return
+    hoverTimeoutRef.current = setTimeout(() => {
+      setShowTooltip(true)
+    }, 300) // 300ms delay before showing tooltip
+  }
+
+  const handleMouseLeave = () => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current)
+    }
+    setShowTooltip(false)
+  }
+
+  const handleClick = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (source) {
+      setShowTooltip(false) // Hide tooltip when opening popover
+      setIsOpen(!isOpen)
+    }
+  }
+
+  return (
+    <span
+      className="relative inline-block"
+      ref={popoverRef}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      <button
+        type="button"
+        disabled={!source}
+        onClick={handleClick}
+        className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium rounded-md align-super -ml-0.5 mr-0.5 border transition-colors ${
+          source
+            ? 'bg-primary/10 text-primary hover:bg-primary/20 border-primary/20 hover:border-primary/40 cursor-pointer'
+            : 'bg-muted text-muted-foreground border-border cursor-default'
+        } ${isOpen ? 'bg-primary/20 border-primary/40' : ''}`}
+      >
+        {sourceIndex}
+      </button>
+
+      {/* Hover tooltip - lightweight preview */}
+      {showTooltip && !isOpen && source && (
+        <div className="absolute z-40 left-0 top-full mt-1 w-64 px-2.5 py-2 bg-foreground text-background text-[11px] rounded-md shadow-lg pointer-events-none animate-in fade-in zoom-in-95 duration-100">
+          <div className="flex items-center gap-1.5 mb-1">
+            <svg className="w-3 h-3 opacity-70 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+            </svg>
+            <span className="font-medium truncate">{source.fileName}</span>
+            {source.pageNumber && (
+              <span className="opacity-70">· p{source.pageNumber}</span>
+            )}
+          </div>
+          <p className="opacity-80 italic leading-snug">"{tooltipPreview}"</p>
+          <p className="mt-1 opacity-50 text-[10px]">Click for more</p>
+        </div>
+      )}
+
+      {/* Click popover - full details */}
+      {isOpen && source && (
+        <div className="absolute z-50 left-0 top-full mt-1 w-80 bg-card border border-border rounded-lg shadow-lg animate-in fade-in slide-in-from-top-1 duration-150">
+          {/* Header */}
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-muted/30 rounded-t-lg">
+            <svg className="w-4 h-4 text-primary flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+            </svg>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-medium text-foreground truncate">{source.fileName}</p>
+              {source.pageNumber && (
+                <p className="text-[10px] text-muted-foreground">Page {source.pageNumber}</p>
+              )}
+            </div>
+            <button
+              onClick={() => setIsOpen(false)}
+              className="text-muted-foreground hover:text-foreground p-0.5"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Content */}
+          <div className="px-3 py-2.5">
+            <p className="text-xs text-muted-foreground italic leading-relaxed">
+              "{fullPreview}"
+            </p>
+          </div>
+
+          {/* Footer */}
+          <div className="px-3 py-2 border-t border-border/50 bg-muted/20 rounded-b-lg">
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                setIsOpen(false)
+                onViewDocument()
+              }}
+              className="text-xs text-primary hover:text-primary/80 font-medium"
+            >
+              View in Document →
+            </button>
+          </div>
+        </div>
+      )}
+    </span>
+  )
+}
+
+// Tiered source display - shows top 5 sources with "Other Sources" dropdown
+const TieredSourcesDisplay = ({
+  sources,
+  onSourceClick,
+}: {
+  sources: Source[]
+  onSourceClick: (source: Source) => void
+}) => {
+  const [showOtherSources, setShowOtherSources] = useState(false)
+
+  // Sort by similarity score (highest first) - scores are already included from backend
+  const sortedSources = [...sources].sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
+  const topSources = sortedSources.slice(0, 5)
+  const otherSources = sortedSources.slice(5)
+
+  // Group sources by fileName
+  const groupSourcesByFile = (sourcesToGroup: Source[]) => {
+    const grouped = new Map<string, { fileName: string; sources: Source[] }>()
+    sourcesToGroup.forEach(source => {
+      if (!grouped.has(source.fileName)) {
+        grouped.set(source.fileName, { fileName: source.fileName, sources: [] })
+      }
+      grouped.get(source.fileName)!.sources.push(source)
+    })
+    return Array.from(grouped.values())
+  }
+
+  const topGrouped = groupSourcesByFile(topSources)
+  const otherGrouped = groupSourcesByFile(otherSources)
+
+  return (
+    <div className="space-y-2">
+      {/* Top sources */}
+      <div className="space-y-1.5">
+        {topGrouped.map((group) => (
+          <div
+            key={group.fileName}
+            className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/40 hover:border-primary/20 bg-muted/20 hover:bg-muted/30 transition-colors"
+          >
+            <svg className="w-4 h-4 text-muted-foreground/60 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+            </svg>
+            <span className="text-xs text-foreground/80 truncate flex-1 min-w-0">{group.fileName}</span>
+            <div className="flex gap-0.5 flex-shrink-0">
+              {group.sources.slice(0, 6).map(source => (
+                <button
+                  key={source.index}
+                  onClick={() => onSourceClick(source)}
+                  className="w-5 h-5 flex items-center justify-center bg-primary/10 text-primary text-[10px] font-semibold rounded hover:bg-primary/20 transition-colors"
+                  title={source.pageNumber ? `Page ${source.pageNumber}` : `Source ${source.index}`}
+                >
+                  {source.index}
+                </button>
+              ))}
+              {group.sources.length > 6 && (
+                <span className="w-5 h-5 flex items-center justify-center text-[9px] text-muted-foreground">+{group.sources.length - 6}</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Other sources dropdown */}
+      {otherSources.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowOtherSources(!showOtherSources)}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
+          >
+            <span className="text-[10px]">{showOtherSources ? '▼' : '▶'}</span>
+            <span>Other Sources ({otherSources.length})</span>
+          </button>
+          {showOtherSources && (
+            <div className="pl-3 space-y-1 border-l-2 border-muted/50">
+              {otherGrouped.map((group) => (
+                <div
+                  key={group.fileName}
+                  className="flex items-center gap-2 px-2 py-1 rounded-md hover:bg-muted/20 transition-colors"
+                >
+                  <svg className="w-3.5 h-3.5 text-muted-foreground/50 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                  </svg>
+                  <span className="text-[11px] text-foreground/70 truncate flex-1 min-w-0">{group.fileName}</span>
+                  <div className="flex gap-0.5 flex-shrink-0">
+                    {group.sources.slice(0, 4).map(source => (
+                      <button
+                        key={source.index}
+                        onClick={() => onSourceClick(source)}
+                        className="w-4 h-4 flex items-center justify-center bg-muted text-muted-foreground text-[9px] font-medium rounded hover:bg-primary/10 hover:text-primary transition-colors"
+                        title={source.pageNumber ? `Page ${source.pageNumber}` : `Source ${source.index}`}
+                      >
+                        {source.index}
+                      </button>
+                    ))}
+                    {group.sources.length > 4 && (
+                      <span className="w-4 h-4 flex items-center justify-center text-[8px] text-muted-foreground">+{group.sources.length - 4}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function ChatContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -533,7 +793,7 @@ function ChatContent() {
     }
   }, [])
 
-  // Render text with clickable citations [1], [2], etc.
+  // Render text with clickable citations [1], [2], etc. - now with popover
   const renderTextWithCitations = (text: string, sources: Source[]) => {
     const parts = text.split(/(\[\d+\])/g)
     return parts.map((part, i) => {
@@ -542,24 +802,14 @@ function ChatContent() {
         const sourceIndex = parseInt(match[1], 10)
         const source = sources.find(s => s.index === sourceIndex)
         return (
-          <button
+          <CitationPopover
             key={`cite-${sourceIndex}-${i}-${sources.length}`}
-            type="button"
-            disabled={!source}
-            onClick={(e) => {
-              e.preventDefault()
-              e.stopPropagation()
+            source={source}
+            sourceIndex={sourceIndex}
+            onViewDocument={() => {
               if (source) handleCitationClick(sourceIndex, sources)
             }}
-            className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium rounded-md align-super -ml-0.5 mr-0.5 border transition-colors ${
-              source
-                ? 'bg-primary/10 text-primary hover:bg-primary/20 border-primary/20 hover:border-primary/40 cursor-pointer'
-                : 'bg-muted text-muted-foreground border-border cursor-default'
-            }`}
-            title={source ? `${source.fileName}${source.pageNumber ? ` • Page ${source.pageNumber}` : ''}` : 'Loading...'}
-          >
-            {sourceIndex}
-          </button>
+          />
         )
       }
       return part || null
@@ -802,56 +1052,21 @@ function ChatContent() {
                           <span className="w-2 h-2 bg-primary rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
                         </div>
                       )}
-                      {/* Sources footer - Show renumbered sources */}
-                      {displaySources.length > 0 && (() => {
-                        // Group sources by fileName (already renumbered)
-                        const groupedSources = new Map<string, { fileName: string; sources: Source[] }>()
-                        displaySources.forEach(source => {
-                          if (!groupedSources.has(source.fileName)) {
-                            groupedSources.set(source.fileName, { fileName: source.fileName, sources: [] })
-                          }
-                          groupedSources.get(source.fileName)!.sources.push(source)
-                        })
-
-                        return (
-                          <div className="mt-4 pt-3 border-t border-border/30">
-                            <div className="flex items-center gap-1.5 mb-2">
-                              <svg className="w-3.5 h-3.5 text-muted-foreground/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
-                              </svg>
-                              <span className="text-[11px] font-medium text-muted-foreground/70">Sources</span>
-                            </div>
-                            <div className="space-y-1.5">
-                              {Array.from(groupedSources.values()).map((group) => (
-                                <div
-                                  key={group.fileName}
-                                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg border border-border/40 hover:border-primary/20 bg-muted/20 hover:bg-muted/30 transition-colors"
-                                >
-                                  <svg className="w-4 h-4 text-muted-foreground/60 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-                                  </svg>
-                                  <span className="text-xs text-foreground/80 truncate flex-1 min-w-0">{group.fileName}</span>
-                                  <div className="flex gap-0.5 flex-shrink-0">
-                                    {group.sources.slice(0, 6).map(source => (
-                                      <button
-                                        key={source.index}
-                                        onClick={() => handleCitationClick(source.index, displaySources)}
-                                        className="w-5 h-5 flex items-center justify-center bg-primary/10 text-primary text-[10px] font-semibold rounded hover:bg-primary/20 transition-colors"
-                                        title={source.pageNumber ? `Page ${source.pageNumber}` : `Source ${source.index}`}
-                                      >
-                                        {source.index}
-                                      </button>
-                                    ))}
-                                    {group.sources.length > 6 && (
-                                      <span className="w-5 h-5 flex items-center justify-center text-[9px] text-muted-foreground">+{group.sources.length - 6}</span>
-                                    )}
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
+                      {/* Sources footer - Tiered display ordered by relevance */}
+                      {msg.sources && msg.sources.length > 0 && (
+                        <div className="mt-4 pt-3 border-t border-border/30">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <svg className="w-3.5 h-3.5 text-muted-foreground/70" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
+                            </svg>
+                            <span className="text-[11px] font-medium text-muted-foreground/70">Sources ({msg.sources.length})</span>
                           </div>
-                        )
-                      })()}
+                          <TieredSourcesDisplay
+                            sources={msg.sources}
+                            onSourceClick={(source) => handleCitationClick(source.index, msg.sources || [])}
+                          />
+                        </div>
+                      )}
                       {/* Feedback Buttons */}
                       {displayContent && sessionId && (
                         <FeedbackButtons

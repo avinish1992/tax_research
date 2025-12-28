@@ -257,6 +257,7 @@ export async function POST(request: NextRequest) {
       content: string
       documentId: string
       fileUrl: string | null
+      similarity: number  // RRF score for relevance-based ordering
     }> = []
 
     if (relevantChunks.length > 0) {
@@ -294,14 +295,15 @@ export async function POST(request: NextRequest) {
         const pageInfo = chunk.pageNumber ? ` (Page ${chunk.pageNumber})` : ''
         contextText += `[${sourceNum}] Source: ${chunk.fileName}${pageInfo}\n${chunk.content}\n\n---\n\n`
 
-        // Add to sources list for frontend with documentId and fileUrl
+        // Add to sources list for frontend with documentId, fileUrl, and similarity score
         sourcesList.push({
           index: sourceNum,
           fileName: chunk.fileName,
           pageNumber: chunk.pageNumber,
           content: chunk.content.substring(0, 500) + (chunk.content.length > 500 ? '...' : ''),
           documentId: chunk.documentId,
-          fileUrl: documentUrls.get(chunk.documentId) || null
+          fileUrl: documentUrls.get(chunk.documentId) || null,
+          similarity: chunk.score  // Include RRF relevance score for tiered display
         })
       })
       contextText += '=== END OF DOCUMENTS ===\n\n'
@@ -326,7 +328,7 @@ YOUR CAPABILITIES:
 - Help users understand compliance requirements
 - Respond to greetings and clarifying questions naturally
 
-CITATION GUIDELINES (IMPORTANT):
+CITATION GUIDELINES (CRITICAL - FOLLOW EXACTLY):
 When referencing information from the provided documents, you MUST use inline numbered citations in the format [1], [2], etc.
 - Each citation number corresponds to the source number shown in the document context (e.g., "[1] Source: ...")
 - Place the citation immediately after the fact or claim it supports
@@ -334,6 +336,13 @@ When referencing information from the provided documents, you MUST use inline nu
 - You can cite multiple sources for one statement: "Small businesses may qualify for relief [1][3]."
 - Only cite sources that are actually provided in the context below
 - If you mention a page number, include it naturally: "According to the guidelines on Page 19 [1]..."
+
+CITATION CONSISTENCY REQUIREMENTS:
+- You MUST cite at least one source for EVERY factual claim you make
+- Use ALL provided sources that contain relevant information - do not skip sources
+- When multiple sources support a claim, cite all of them: [1][2][3]
+- Cite sources in order of their relevance to each specific claim
+- Be thorough: if information comes from source [5], cite [5] even if you already cited [1][2][3][4]
 
 RESPONSE GUIDELINES:
 1. For greetings (hello, hi, etc.): Respond naturally and briefly mention you can help with UAE tax questions.
