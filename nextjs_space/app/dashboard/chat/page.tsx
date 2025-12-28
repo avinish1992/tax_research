@@ -263,7 +263,18 @@ function ChatContent() {
               if (parsed.error) {
                 throw new Error(parsed.error)
               }
-              if (parsed.sources) sources = parsed.sources
+              if (parsed.sources) {
+                sources = parsed.sources
+                // IMMEDIATELY attach sources to message state (don't wait for content)
+                // This fixes production behavior where React batches updates differently
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, sources }
+                      : msg
+                  )
+                )
+              }
               // Handle real message IDs from backend (for feedback functionality)
               if (parsed.messageIds) {
                 const { userMessageId, assistantMessageId } = parsed.messageIds
