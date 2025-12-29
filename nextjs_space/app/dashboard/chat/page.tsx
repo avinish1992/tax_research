@@ -7,6 +7,24 @@ import { Streamdown } from 'streamdown'
 import { useSidebar } from '@/components/sidebar-context'
 import { FeedbackButtons } from '@/components/feedback-buttons'
 import { ClientOnly } from '@/components/ClientOnly'
+import { HighlightedText } from '@/lib/text-highlight'
+import dynamic from 'next/dynamic'
+
+// Dynamically import PDFViewer to avoid SSR issues with canvas
+const PDFViewerWithHighlight = dynamic(
+  () => import('@/components/PDFViewerWithHighlight'),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex-1 flex items-center justify-center bg-muted/30">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-8 h-8 border-2 border-muted-foreground/20 border-t-primary rounded-full animate-spin" />
+          <p className="text-sm text-muted-foreground">Loading PDF viewer...</p>
+        </div>
+      </div>
+    )
+  }
+)
 
 interface UploadingFile {
   name: string
@@ -322,6 +340,14 @@ function ChatContent() {
   const [model] = useState('gpt-4o-mini')
   const [uploadingFiles, setUploadingFiles] = useState<UploadingFile[]>([])
   const [isLoadingSourceUrl, setIsLoadingSourceUrl] = useState(false)
+  const [showDocSearch, setShowDocSearch] = useState(false)
+  const [docSearchQuery, setDocSearchQuery] = useState('')
+  const [docSearchResults, setDocSearchResults] = useState<Array<{ pageNumber: number | null; content: string; chunkIndex: number; matchQuery: string }>>([])
+  const [isSearchingDoc, setIsSearchingDoc] = useState(false)
+  const [selectedResultIdx, setSelectedResultIdx] = useState(0)
+  const [usePdfViewer, setUsePdfViewer] = useState(false) // Use react-pdf instead of iframe
+  const [highlightText, setHighlightText] = useState<string | undefined>(undefined)
+  const searchPillsRef = useRef<HTMLDivElement>(null)
 
   // Track if we're currently sending a message (to prevent reload from clearing state)
   const isSendingRef = useRef(false)
@@ -385,6 +411,41 @@ function ChatContent() {
       setIsLoadingDocs(false)
     }
   }, [])
+
+  // Document search within the preview modal
+  const handleDocSearch = useCallback(async () => {
+    if (!previewSource?.documentId || !docSearchQuery.trim()) return
+
+    setIsSearchingDoc(true)
+    try {
+      const response = await fetch(
+        `/api/docs-api/search?documentId=${previewSource.documentId}&q=${encodeURIComponent(docSearchQuery.trim())}`
+      )
+      if (!response.ok) {
+        const error = await response.json()
+        console.error('Search error:', error)
+        setDocSearchResults([])
+        return
+      }
+      const results = await response.json()
+      setDocSearchResults(results)
+      setSelectedResultIdx(0) // Reset to first result
+    } catch (error) {
+      console.error('Failed to search document:', error)
+      setDocSearchResults([])
+    } finally {
+      setIsSearchingDoc(false)
+    }
+  }, [previewSource?.documentId, docSearchQuery])
+
+  // Reset search and PDF viewer state when changing documents
+  useEffect(() => {
+    setShowDocSearch(false)
+    setDocSearchQuery('')
+    setDocSearchResults([])
+    setSelectedResultIdx(0)
+    // Don't reset usePdfViewer or highlightText here - they're set per citation click
+  }, [previewSource?.documentId])
 
   useEffect(() => {
     if (sessionId) {
@@ -765,6 +826,8 @@ function ChatContent() {
     if (source) {
       setPreviewDoc(null) // Clear document preview when showing source
       setShowSourcesPanel(true)
+      setUsePdfViewer(true) // Use PDF viewer with highlighting
+      setHighlightText(source.content) // Set text to highlight in PDF
 
       // If we have a documentId, fetch a fresh signed URL
       if (source.documentId) {
@@ -1239,6 +1302,33 @@ function ChatContent() {
                 <span className="w-5 h-5 flex items-center justify-center bg-primary/15 text-primary text-[10px] font-semibold rounded-full flex-shrink-0">
                   {previewSource.index}
                 </span>
+                {/* Search toggle button */}
+                <button
+                  onClick={() => setShowDocSearch(!showDocSearch)}
+                  className={`p-1.5 rounded transition-colors ${showDocSearch ? 'bg-primary/15 text-primary' : 'hover:bg-secondary text-muted-foreground hover:text-foreground'}`}
+                  title="Search in document"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </button>
+                {/* PDF viewer mode toggle */}
+                {previewSource.fileUrl && (
+                  <button
+                    onClick={() => {
+                      setUsePdfViewer(!usePdfViewer)
+                      if (!usePdfViewer) {
+                        setHighlightText(previewSource.content) // Re-apply highlight when switching to PDF viewer
+                      }
+                    }}
+                    className={`p-1.5 rounded transition-colors ${usePdfViewer ? 'bg-yellow-100 dark:bg-yellow-900/30 text-yellow-700 dark:text-yellow-300' : 'hover:bg-secondary text-muted-foreground hover:text-foreground'}`}
+                    title={usePdfViewer ? 'Highlighting enabled (click to use basic view)' : 'Enable text highlighting'}
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9.53 16.122a3 3 0 00-5.78 1.128 2.25 2.25 0 01-2.4 2.245 4.5 4.5 0 008.4-2.245c0-.399-.078-.78-.22-1.128zm0 0a15.998 15.998 0 003.388-1.62m-5.043-.025a15.994 15.994 0 011.622-3.395m3.42 3.42a15.995 15.995 0 004.764-4.648l3.876-5.814a1.151 1.151 0 00-1.597-1.597L14.146 6.32a15.996 15.996 0 00-4.649 4.763m3.42 3.42a6.776 6.776 0 00-3.42-3.42" />
+                    </svg>
+                  </button>
+                )}
                 <button
                   onClick={() => setShowSourcesPanel(false)}
                   className="p-1.5 rounded hover:bg-secondary text-muted-foreground hover:text-foreground ml-1"
@@ -1249,6 +1339,132 @@ function ChatContent() {
                   </svg>
                 </button>
               </div>
+
+              {/* Document Search Panel */}
+              {showDocSearch && (
+                <div className="flex-shrink-0 p-3 border-b border-border bg-muted/20">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={docSearchQuery}
+                      onChange={(e) => setDocSearchQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleDocSearch()}
+                      placeholder="Search in this document..."
+                      className="flex-1 px-3 py-1.5 text-sm rounded-md border border-border bg-background focus:outline-none focus:ring-2 focus:ring-primary/20"
+                      autoFocus
+                    />
+                    <button
+                      onClick={handleDocSearch}
+                      disabled={isSearchingDoc || !docSearchQuery.trim()}
+                      className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {isSearchingDoc ? '...' : 'Search'}
+                    </button>
+                  </div>
+
+                  {/* Search Results - Enterprise Horizontal Pill Bar */}
+                  {docSearchResults.length > 0 && (
+                    <div className="mt-3">
+                      {/* Results header with count */}
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-xs font-medium text-muted-foreground">
+                          {docSearchResults.length} result{docSearchResults.length !== 1 ? 's' : ''}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {selectedResultIdx + 1} / {docSearchResults.length}
+                        </span>
+                      </div>
+
+                      {/* Horizontal pill navigation bar */}
+                      <div className="flex items-center gap-1.5">
+                        {/* Previous button */}
+                        <button
+                          onClick={() => {
+                            const newIdx = Math.max(0, selectedResultIdx - 1)
+                            setSelectedResultIdx(newIdx)
+                            const result = docSearchResults[newIdx]
+                            if (result?.pageNumber && previewSource) {
+                              setPreviewSource({ ...previewSource, pageNumber: result.pageNumber })
+                            }
+                          }}
+                          disabled={selectedResultIdx === 0}
+                          className="w-7 h-7 flex items-center justify-center rounded-md border border-border bg-background hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                          title="Previous result"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+                          </svg>
+                        </button>
+
+                        {/* Scrollable pills container */}
+                        <div
+                          ref={searchPillsRef}
+                          className="flex-1 flex items-center gap-1 overflow-x-auto scrollbar-hide py-0.5 px-0.5"
+                          style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }}
+                        >
+                          {docSearchResults.map((result, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => {
+                                setSelectedResultIdx(idx)
+                                if (result.pageNumber && previewSource) {
+                                  setPreviewSource({ ...previewSource, pageNumber: result.pageNumber })
+                                }
+                              }}
+                              className={`px-2.5 py-1 text-xs font-medium rounded-full whitespace-nowrap transition-all flex-shrink-0 ${
+                                idx === selectedResultIdx
+                                  ? 'bg-primary text-primary-foreground shadow-sm'
+                                  : 'bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground'
+                              }`}
+                              title={`Go to page ${result.pageNumber || idx + 1}`}
+                            >
+                              {result.pageNumber ? `p${result.pageNumber}` : `#${idx + 1}`}
+                            </button>
+                          ))}
+                        </div>
+
+                        {/* Next button */}
+                        <button
+                          onClick={() => {
+                            const newIdx = Math.min(docSearchResults.length - 1, selectedResultIdx + 1)
+                            setSelectedResultIdx(newIdx)
+                            const result = docSearchResults[newIdx]
+                            if (result?.pageNumber && previewSource) {
+                              setPreviewSource({ ...previewSource, pageNumber: result.pageNumber })
+                            }
+                          }}
+                          disabled={selectedResultIdx === docSearchResults.length - 1}
+                          className="w-7 h-7 flex items-center justify-center rounded-md border border-border bg-background hover:bg-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0"
+                          title="Next result"
+                        >
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                          </svg>
+                        </button>
+                      </div>
+
+                      {/* Selected result excerpt preview */}
+                      {docSearchResults[selectedResultIdx] && (
+                        <div className="mt-2 p-2.5 bg-muted/40 rounded-lg border border-border/50">
+                          <p className="text-xs text-muted-foreground leading-relaxed">
+                            <HighlightedText
+                              text={docSearchResults[selectedResultIdx].content}
+                              query={docSearchResults[selectedResultIdx].matchQuery}
+                              maxLength={200}
+                            />
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* No results message */}
+                  {docSearchQuery && docSearchResults.length === 0 && !isSearchingDoc && (
+                    <p className="mt-2 text-sm text-muted-foreground">No results found for &quot;{docSearchQuery}&quot;</p>
+                  )}
+                </div>
+              )}
+
               {isLoadingSourceUrl ? (
                 /* Loading state while fetching fresh URL */
                 <div className="flex-1 flex items-center justify-center bg-muted/30">
@@ -1258,15 +1474,25 @@ function ChatContent() {
                   </div>
                 </div>
               ) : previewSource.fileUrl ? (
-                /* Full PDF Preview with page navigation */
-                <div className="flex-1 overflow-hidden bg-muted/30">
-                  <iframe
-                    key={`${previewSource.index}-${previewSource.pageNumber}`}
-                    src={`${previewSource.fileUrl}${previewSource.pageNumber ? `#page=${previewSource.pageNumber}` : ''}`}
-                    className="w-full h-full border-0"
-                    title={`PDF Preview: ${previewSource.fileName}`}
+                /* PDF Preview - use react-pdf with highlighting when citation clicked */
+                usePdfViewer ? (
+                  <PDFViewerWithHighlight
+                    url={previewSource.fileUrl}
+                    pageNumber={previewSource.pageNumber || 1}
+                    highlightText={highlightText}
+                    fileName={previewSource.fileName}
                   />
-                </div>
+                ) : (
+                  /* Fallback to iframe for simple viewing */
+                  <div className="flex-1 overflow-hidden bg-muted/30">
+                    <iframe
+                      key={`${previewSource.index}-${previewSource.pageNumber}`}
+                      src={`${previewSource.fileUrl}${previewSource.pageNumber ? `#page=${previewSource.pageNumber}` : ''}`}
+                      className="w-full h-full border-0"
+                      title={`PDF Preview: ${previewSource.fileName}`}
+                    />
+                  </div>
+                )
               ) : (
                 /* Fallback to text content when PDF URL not available */
                 <div className="flex-1 overflow-y-auto p-4">

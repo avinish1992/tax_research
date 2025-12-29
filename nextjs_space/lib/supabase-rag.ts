@@ -240,9 +240,14 @@ export async function semanticSearch(
   return results
 }
 
+interface HybridSearchV2Result extends HybridSearchResult {
+  semantic_similarity: number | null
+  keyword_score: number | null
+}
+
 /**
- * Hybrid search using Supabase RPC function
- * Combines semantic (vector) and keyword search with RRF fusion
+ * Hybrid search using improved Supabase RPC function
+ * Combines semantic (vector) and BM25-style keyword search with RRF fusion
  */
 export async function hybridSearch(
   query: string,
@@ -252,14 +257,14 @@ export async function hybridSearch(
   minSimilarity: number = DEFAULT_MIN_SIMILARITY
 ): Promise<SearchResult[]> {
   const dims = queryEmbedding.length
-  // Use appropriate hybrid search function based on embedding dimensions
-  const searchFunction = dims === 384 ? 'hybrid_search_local' : 'hybrid_search'
+  // Use v2 for OpenAI embeddings (1536), fallback for local (384)
+  const searchFunction = dims === 384 ? 'hybrid_search_local' : 'hybrid_search_v2'
   console.log(`\n🔀 Hybrid Search (${dims} dims, ${searchFunction})`)
   console.log(`   Query: "${query.substring(0, 100)}..."`)
 
   const supabase = await createClient()
 
-  // Try hybrid search first
+  // Try improved hybrid search (v2 with BM25)
   try {
     const embeddingParam = dims === 384
       ? `[${queryEmbedding.join(',')}]`
@@ -277,7 +282,67 @@ export async function hybridSearch(
     })
 
     if (error) {
-      console.warn('❌ Hybrid search error, falling back to semantic:', error.message)
+      console.warn('❌ Hybrid search v2 error, falling back to v1:', error.message)
+      // Fallback to original hybrid search
+      return hybridSearchV1(query, queryEmbedding, userId, topK, minSimilarity)
+    }
+
+    const results: SearchResult[] = (data as HybridSearchV2Result[]).map((row) => ({
+      content: row.content,
+      fileName: row.file_name,
+      score: row.rrf_score,
+      chunkIndex: row.chunk_index,
+      pageNumber: row.page_number,
+      source: row.search_type,
+      documentId: row.document_id
+    }))
+
+    console.log(`✓ Hybrid search (BM25): ${results.length} results`)
+    if (results.length > 0) {
+      const topResult = data[0] as HybridSearchV2Result
+      console.log(`  Top: ${results[0].source} (RRF: ${results[0].score.toFixed(4)}, sem: ${topResult.semantic_similarity?.toFixed(3) || 'N/A'}, kw: ${topResult.keyword_score?.toFixed(3) || 'N/A'})`)
+    }
+
+    return results
+  } catch (error) {
+    console.error('❌ Hybrid search v2 failed:', error)
+    return semanticSearch(queryEmbedding, userId, topK, minSimilarity)
+  }
+}
+
+/**
+ * Original hybrid search (v1) as fallback
+ */
+async function hybridSearchV1(
+  query: string,
+  queryEmbedding: number[],
+  userId: string,
+  topK: number = DEFAULT_TOP_K,
+  minSimilarity: number = DEFAULT_MIN_SIMILARITY
+): Promise<SearchResult[]> {
+  const dims = queryEmbedding.length
+  const searchFunction = dims === 384 ? 'hybrid_search_local' : 'hybrid_search'
+
+  const supabase = await createClient()
+
+  try {
+    const embeddingParam = dims === 384
+      ? `[${queryEmbedding.join(',')}]`
+      : JSON.stringify(queryEmbedding)
+
+    const { data, error } = await supabase.rpc(searchFunction, {
+      query_text: query,
+      query_embedding: embeddingParam,
+      p_user_id: userId,
+      match_count: topK,
+      semantic_weight: 0.6,
+      keyword_weight: 0.4,
+      rrf_k: RRF_K,
+      min_semantic_similarity: minSimilarity
+    })
+
+    if (error) {
+      console.warn('❌ Hybrid search v1 error, falling back to semantic:', error.message)
       return semanticSearch(queryEmbedding, userId, topK, minSimilarity)
     }
 
@@ -291,45 +356,222 @@ export async function hybridSearch(
       documentId: row.document_id
     }))
 
-    console.log(`✓ Hybrid search: ${results.length} results`)
-    if (results.length > 0) {
-      console.log(`  Top: ${results[0].source} (score: ${results[0].score.toFixed(4)})`)
-    }
-
+    console.log(`✓ Hybrid search v1: ${results.length} results`)
     return results
   } catch (error) {
-    console.error('❌ Hybrid search failed:', error)
+    console.error('❌ Hybrid search v1 failed:', error)
     return semanticSearch(queryEmbedding, userId, topK, minSimilarity)
   }
 }
 
+// =============================================================================
+// QUERY EXPANSION & NORMALIZATION
+// =============================================================================
+
 /**
- * Query expansion for legal documents
+ * Legal/Tax domain synonyms for query expansion
+ * Maps terms to their synonyms and related concepts
+ */
+const LEGAL_SYNONYMS: Record<string, string[]> = {
+  // Tax terms
+  'tax': ['taxation', 'levy', 'duty', 'tariff'],
+  'rate': ['percentage', 'ratio', 'proportion'],
+  'corporate': ['company', 'business', 'enterprise', 'firm'],
+  'income': ['revenue', 'earnings', 'profit', 'proceeds'],
+  'penalty': ['fine', 'sanction', 'punishment', 'fee'],
+  'exempt': ['excluded', 'waived', 'relieved', 'free from'],
+  'exemption': ['exclusion', 'waiver', 'relief', 'deduction'],
+  'deduction': ['allowance', 'reduction', 'write-off', 'credit'],
+  'compliance': ['adherence', 'conformity', 'observance'],
+  'violation': ['breach', 'infringement', 'non-compliance', 'offense'],
+  'filing': ['submission', 'declaration', 'return'],
+  'assessment': ['evaluation', 'determination', 'calculation'],
+  'liability': ['obligation', 'duty', 'responsibility'],
+  'threshold': ['limit', 'minimum', 'ceiling', 'cap'],
+  'resident': ['domiciled', 'established', 'based'],
+  'non-resident': ['foreign', 'overseas', 'external'],
+
+  // Legal structure terms
+  'article': ['section', 'clause', 'provision', 'paragraph'],
+  'chapter': ['part', 'division', 'title'],
+  'regulation': ['rule', 'law', 'statute', 'ordinance'],
+  'decree': ['order', 'directive', 'resolution'],
+
+  // UAE-specific terms
+  'uae': ['emirates', 'united arab emirates', 'gulf'],
+  'aed': ['dirhams', 'dhs', 'dirham'],
+  'free zone': ['freezone', 'fz', 'free trade zone', 'ftz'],
+  'mainland': ['onshore', 'local'],
+
+  // Business terms
+  'entity': ['company', 'organization', 'establishment', 'business'],
+  'subsidiary': ['affiliate', 'branch', 'division'],
+  'group': ['conglomerate', 'holding', 'parent'],
+  'transfer pricing': ['intercompany pricing', 'related party transactions'],
+}
+
+/**
+ * Common misspellings and typo corrections
+ */
+const TYPO_CORRECTIONS: Record<string, string> = {
+  'corproate': 'corporate',
+  'coporate': 'corporate',
+  'corperate': 'corporate',
+  'taxs': 'tax',
+  'taxess': 'taxes',
+  'penaltiy': 'penalty',
+  'penalities': 'penalties',
+  'compiance': 'compliance',
+  'compilance': 'compliance',
+  'exemtion': 'exemption',
+  'exmeption': 'exemption',
+  'dedcution': 'deduction',
+  'deductoin': 'deduction',
+  'violaton': 'violation',
+  'assesment': 'assessment',
+  'assessement': 'assessment',
+  'liabilty': 'liability',
+  'reveune': 'revenue',
+  'revneue': 'revenue',
+  'incmoe': 'income',
+  'incoem': 'income',
+}
+
+/**
+ * Abbreviation expansions
+ */
+const ABBREVIATIONS: Record<string, string> = {
+  'ct': 'corporate tax',
+  'vat': 'value added tax',
+  'fta': 'federal tax authority',
+  'rta': 'roads and transport authority',
+  'mof': 'ministry of finance',
+  'qfzp': 'qualifying free zone person',
+  'fy': 'fiscal year',
+  'ty': 'tax year',
+  'tp': 'transfer pricing',
+  'pe': 'permanent establishment',
+  'dta': 'double taxation agreement',
+  'dtaa': 'double taxation avoidance agreement',
+  'poa': 'power of attorney',
+  'roi': 'return on investment',
+  'p&l': 'profit and loss',
+  'bs': 'balance sheet',
+}
+
+/**
+ * Normalize query by fixing typos and standardizing text
+ */
+function normalizeQuery(query: string): string {
+  let normalized = query.toLowerCase().trim()
+
+  // Fix common typos
+  for (const [typo, correction] of Object.entries(TYPO_CORRECTIONS)) {
+    const regex = new RegExp(`\\b${typo}\\b`, 'gi')
+    normalized = normalized.replace(regex, correction)
+  }
+
+  // Expand abbreviations (only when standalone word)
+  for (const [abbr, expansion] of Object.entries(ABBREVIATIONS)) {
+    const regex = new RegExp(`\\b${abbr}\\b`, 'gi')
+    if (regex.test(normalized)) {
+      normalized = normalized.replace(regex, expansion)
+    }
+  }
+
+  // Remove extra whitespace
+  normalized = normalized.replace(/\s+/g, ' ').trim()
+
+  return normalized
+}
+
+/**
+ * Extract keywords from query (removes stop words)
+ */
+function extractKeywords(query: string): string[] {
+  const stopWords = new Set([
+    'what', 'is', 'the', 'a', 'an', 'are', 'how', 'do', 'does', 'can', 'could',
+    'would', 'should', 'will', 'for', 'to', 'of', 'in', 'on', 'at', 'by', 'with',
+    'about', 'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'between', 'under', 'again', 'further', 'then', 'once', 'here', 'there',
+    'when', 'where', 'why', 'which', 'who', 'whom', 'this', 'that', 'these', 'those',
+    'am', 'be', 'been', 'being', 'have', 'has', 'had', 'having', 'get', 'gets',
+    'please', 'tell', 'me', 'explain', 'describe', 'show', 'give', 'find'
+  ])
+
+  const words = query.toLowerCase().split(/\s+/)
+  return words.filter(word => word.length > 2 && !stopWords.has(word))
+}
+
+/**
+ * Enhanced query expansion for legal/tax documents
+ * Handles synonyms, typos, abbreviations, and structural references
  */
 export function expandLegalQuery(query: string): string {
-  let expanded = query
+  // Step 1: Normalize (fix typos, expand abbreviations)
+  let expanded = normalizeQuery(query)
+  const originalNormalized = expanded
+  const addedTerms: string[] = []
 
-  // Chapter X → add Article X
+  // Step 2: Chapter X ↔ Article X expansion
   const chapterPattern = /chapter\s+(\d+)/gi
-  const chapterMatches = [...query.matchAll(chapterPattern)]
+  const chapterMatches = [...expanded.matchAll(chapterPattern)]
   chapterMatches.forEach((match) => {
-    expanded += ` Article ${match[1]}`
+    addedTerms.push(`Article ${match[1]}`)
   })
 
-  // Article X → add Chapter X
   const articlePattern = /article\s+(\d+)/gi
-  const articleMatches = [...query.matchAll(articlePattern)]
+  const articleMatches = [...expanded.matchAll(articlePattern)]
   articleMatches.forEach((match) => {
-    expanded += ` Chapter ${match[1]}`
+    addedTerms.push(`Chapter ${match[1]}`)
   })
 
-  if (expanded !== query) {
+  // Step 3: Add synonyms for key terms (limit to avoid query explosion)
+  const keywords = extractKeywords(expanded)
+  let synonymsAdded = 0
+  const maxSynonyms = 5 // Limit total synonyms added
+
+  for (const keyword of keywords) {
+    if (synonymsAdded >= maxSynonyms) break
+
+    const synonyms = LEGAL_SYNONYMS[keyword]
+    if (synonyms) {
+      // Add first 1-2 synonyms for each matching term
+      const toAdd = synonyms.slice(0, 2)
+      addedTerms.push(...toAdd)
+      synonymsAdded += toAdd.length
+    }
+  }
+
+  // Step 4: Combine original query with expanded terms
+  if (addedTerms.length > 0) {
+    expanded = `${originalNormalized} ${addedTerms.join(' ')}`
     console.log('📝 Query expansion:')
     console.log(`   Original: "${query}"`)
-    console.log(`   Expanded: "${expanded}"`)
+    console.log(`   Normalized: "${originalNormalized}"`)
+    console.log(`   Added terms: [${addedTerms.join(', ')}]`)
+    console.log(`   Final: "${expanded}"`)
+  } else if (originalNormalized !== query.toLowerCase().trim()) {
+    console.log('📝 Query normalized:')
+    console.log(`   Original: "${query}"`)
+    console.log(`   Normalized: "${originalNormalized}"`)
   }
 
   return expanded
+}
+
+/**
+ * Generate search-optimized query for BM25/full-text search
+ * Converts natural language query to tsquery format
+ */
+export function generateSearchQuery(query: string): string {
+  const keywords = extractKeywords(normalizeQuery(query))
+
+  // Create OR-connected search query for flexibility
+  // e.g., "corporate tax rate" → "corporate | tax | rate"
+  if (keywords.length === 0) return query
+
+  return keywords.join(' | ')
 }
 
 /**
