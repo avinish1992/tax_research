@@ -8,6 +8,7 @@ import {
   updateChatSessionTimestamp,
 } from '@/lib/supabase-db'
 import { createClient } from '@/utils/supabase/server'
+import { classifyQuery, describeClassification } from '@/lib/query-classifier'
 
 export const dynamic = 'force-dynamic'
 
@@ -38,6 +39,108 @@ interface LatencyMetrics {
 
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
+}
+
+/**
+ * Extract citation numbers from LLM response
+ * Finds all [N] patterns and returns unique numbers
+ */
+function extractCitedSources(response: string): number[] {
+  const matches = [...response.matchAll(/\[(\d+)\]/g)]
+  const cited = matches.map(m => parseInt(m[1]))
+  return [...new Set(cited)].sort((a, b) => a - b)
+}
+
+/**
+ * Filter sources to only include those actually cited by the LLM
+ * Re-numbers sources sequentially [1], [2], [3] and updates response text
+ */
+function filterAndRenumberSources(
+  response: string,
+  sources: Array<{
+    index: number
+    fileName: string
+    pageNumber: number | null
+    content: string
+    documentId: string
+    fileUrl: string | null
+    similarity: number
+  }>
+): {
+  filteredResponse: string
+  filteredSources: typeof sources
+  citationMap: Record<number, number> // old index -> new index
+} {
+  const citedIndices = extractCitedSources(response)
+
+  // If no citations found, return minimum sources (top 3 by relevance)
+  if (citedIndices.length === 0) {
+    const topSources = sources.slice(0, 3).map((s, i) => ({ ...s, index: i + 1 }))
+    return {
+      filteredResponse: response,
+      filteredSources: topSources,
+      citationMap: {}
+    }
+  }
+
+  // Filter to only cited sources
+  const citedSources = sources.filter(s => citedIndices.includes(s.index))
+
+  // If somehow no sources matched (shouldn't happen), return top 3
+  if (citedSources.length === 0) {
+    const topSources = sources.slice(0, 3).map((s, i) => ({ ...s, index: i + 1 }))
+    return {
+      filteredResponse: response,
+      filteredSources: topSources,
+      citationMap: {}
+    }
+  }
+
+  // Create mapping from old index to new sequential index
+  const citationMap: Record<number, number> = {}
+  citedSources.forEach((source, i) => {
+    citationMap[source.index] = i + 1
+  })
+
+  // Renumber sources
+  const filteredSources = citedSources.map((s, i) => ({
+    ...s,
+    index: i + 1
+  }))
+
+  // Update response text with new citation numbers
+  let filteredResponse = response
+  // Sort by old index descending to avoid replacement conflicts
+  const sortedOldIndices = Object.keys(citationMap)
+    .map(Number)
+    .sort((a, b) => b - a)
+
+  for (const oldIndex of sortedOldIndices) {
+    const newIndex = citationMap[oldIndex]
+    // Replace [oldIndex] with a temporary placeholder to avoid conflicts
+    const placeholder = `__CITE_${newIndex}__`
+    filteredResponse = filteredResponse.replace(
+      new RegExp(`\\[${oldIndex}\\]`, 'g'),
+      placeholder
+    )
+  }
+
+  // Convert placeholders back to citation format
+  for (let i = 1; i <= filteredSources.length; i++) {
+    filteredResponse = filteredResponse.replace(
+      new RegExp(`__CITE_${i}__`, 'g'),
+      `[${i}]`
+    )
+  }
+
+  console.log(`📋 Citation filtering: ${sources.length} sources → ${filteredSources.length} cited`)
+  console.log(`   Cited indices: [${citedIndices.join(', ')}] → renumbered to [${Object.values(citationMap).join(', ')}]`)
+
+  return {
+    filteredResponse,
+    filteredSources,
+    citationMap
+  }
 }
 
 /**
@@ -203,6 +306,10 @@ export async function POST(request: NextRequest) {
         ragQuery = enrichQueryWithContext(message, chatSession.messages)
       }
 
+      // Step 0.5: Classify query for adaptive retrieval
+      const classification = classifyQuery(ragQuery)
+      console.log(`\n📊 Query Classification: ${describeClassification(classification)}`)
+
       // Step 1: Query expansion for legal documents
       const expandedQuery = expandLegalQuery(ragQuery)
 
@@ -214,13 +321,14 @@ export async function POST(request: NextRequest) {
       console.log(`   Embedding generated in ${metrics.ragEmbeddingTimeMs}ms`)
 
       // Step 3: Hybrid search (semantic + keyword with RRF fusion)
+      // Use classification.topK for adaptive retrieval (5-15 based on query type)
       if (queryEmbedding && queryEmbedding.length > 0) {
         const searchStartTime = Date.now()
         const results = await hybridSearch(
           expandedQuery,
           queryEmbedding,
           user.id,
-          10 // Top 10 chunks
+          classification.topK // Dynamic based on query complexity
         )
         metrics.ragSearchTimeMs = Date.now() - searchStartTime
         console.log(`   Hybrid search completed in ${metrics.ragSearchTimeMs}ms`)
@@ -329,20 +437,21 @@ YOUR CAPABILITIES:
 - Respond to greetings and clarifying questions naturally
 
 CITATION GUIDELINES (CRITICAL - FOLLOW EXACTLY):
-When referencing information from the provided documents, you MUST use inline numbered citations in the format [1], [2], etc.
-- Each citation number corresponds to the source number shown in the document context (e.g., "[1] Source: ...")
+When referencing information from the provided documents, use inline numbered citations [1], [2], etc.
 - Place the citation immediately after the fact or claim it supports
 - Example: "The corporate tax rate is 9% for income above AED 375,000 [2]."
-- You can cite multiple sources for one statement: "Small businesses may qualify for relief [1][3]."
-- Only cite sources that are actually provided in the context below
-- If you mention a page number, include it naturally: "According to the guidelines on Page 19 [1]..."
+- Multiple sources for one claim: "Small businesses may qualify for relief [1][3]."
 
-CITATION CONSISTENCY REQUIREMENTS:
-- You MUST cite at least one source for EVERY factual claim you make
-- Use ALL provided sources that contain relevant information - do not skip sources
-- When multiple sources support a claim, cite all of them: [1][2][3]
-- Cite sources in order of their relevance to each specific claim
-- Be thorough: if information comes from source [5], cite [5] even if you already cited [1][2][3][4]
+CITATION QUALITY RULES (IMPORTANT):
+1. ONLY cite sources whose content you ACTUALLY USE in your response
+   - Do NOT cite a source just because it exists or seems related
+   - If you don't use information from source [5], don't cite [5]
+2. MATCH citations to specific content:
+   - If you state "9%" or "AED 375,000", cite the source containing that exact figure
+   - If you mention "Article 23", cite the source with Article 23 text
+3. For factual claims, cite at least one source that contains the supporting information
+4. When multiple sources support the same claim, cite all relevant ones: [1][3]
+5. Cite sources in order of relevance to each specific claim
 
 RESPONSE GUIDELINES:
 1. For greetings (hello, hi, etc.): Respond naturally and briefly mention you can help with UAE tax questions.
@@ -580,11 +689,33 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
 
           // Save assistant message (using Supabase) with sources in metadata
           if (fullResponse) {
+            // === CITATION VALIDATION ===
+            // Filter sources to only include those actually cited by the LLM
+            // This ensures users only see relevant sources, not all 10 retrieved
+            let finalResponse = fullResponse
+            let finalSources = sourcesList
+
+            if (sourcesList.length > 0) {
+              const { filteredResponse, filteredSources } = filterAndRenumberSources(
+                fullResponse,
+                sourcesList
+              )
+              finalResponse = filteredResponse
+              finalSources = filteredSources
+
+              // Send filtered sources update to frontend
+              // Frontend can use this to replace the initial full sources list
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+                filteredSources: filteredSources,
+                sourcesFiltered: true
+              })}\n\n`))
+            }
+
             const assistantMessage = await createMessage({
               chatSessionId,
               role: 'assistant',
-              content: fullResponse,
-              metadata: sourcesList.length > 0 ? { sources: sourcesList } : {},
+              content: finalResponse,
+              metadata: finalSources.length > 0 ? { sources: finalSources } : {},
             })
 
             // Update chat session timestamp (using Supabase)

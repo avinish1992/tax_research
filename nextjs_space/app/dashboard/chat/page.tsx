@@ -623,6 +623,18 @@ function ChatContent() {
                   })
                 )
               }
+              // Handle filtered sources from backend (after LLM response completes)
+              // This updates sources to only include those actually cited
+              if (parsed.filteredSources && parsed.sourcesFiltered) {
+                sources = parsed.filteredSources
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, sources: parsed.filteredSources }
+                      : msg
+                  )
+                )
+              }
               const content = parsed?.choices?.[0]?.delta?.content
               if (content) {
                 assistantResponse += content
@@ -675,6 +687,17 @@ function ChatContent() {
                     }
                     return msg
                   })
+                )
+              }
+              // Handle filtered sources from backend (buffer processing)
+              if (parsed.filteredSources && parsed.sourcesFiltered) {
+                sources = parsed.filteredSources
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, sources: parsed.filteredSources }
+                      : msg
+                  )
                 )
               }
               const content = parsed?.choices?.[0]?.delta?.content

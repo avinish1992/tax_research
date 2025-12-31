@@ -407,7 +407,24 @@ const LEGAL_SYNONYMS: Record<string, string[]> = {
   'entity': ['company', 'organization', 'establishment', 'business'],
   'subsidiary': ['affiliate', 'branch', 'division'],
   'group': ['conglomerate', 'holding', 'parent'],
-  'transfer pricing': ['intercompany pricing', 'related party transactions'],
+
+  // Technical tax terms (for complex queries)
+  'transfer pricing': ['arm\'s length', 'intercompany pricing', 'TP', 'related party transactions'],
+  'permanent establishment': ['PE', 'fixed place of business', 'taxable presence', 'business presence'],
+  'arm\'s length': ['market value', 'fair value', 'comparable price'],
+  'related party': ['connected person', 'associated enterprise', 'affiliate', 'controlled entity'],
+  'withholding tax': ['WHT', 'tax withheld', 'withholding', 'source taxation'],
+  'thin capitalization': ['debt-to-equity', 'interest limitation', 'EBITDA limitation', 'thin cap'],
+  'anti-abuse': ['GAAR', 'anti-avoidance', 'substance over form', 'tax avoidance'],
+  'gaar': ['general anti-avoidance', 'anti-abuse rule', 'avoidance rule'],
+  'beneficial owner': ['beneficial ownership', 'ultimate beneficiary', 'UBO'],
+  'double taxation': ['DTA', 'tax treaty', 'bilateral agreement', 'double tax relief'],
+  'taxable person': ['taxpayer', 'tax subject', 'person liable to tax'],
+  'qualifying income': ['qualifying revenue', 'eligible income', 'exempt income'],
+  'qualifying free zone person': ['QFZP', 'qualifying FZ person', 'free zone taxpayer'],
+  'small business': ['small enterprise', 'SME', 'micro business', 'small business relief'],
+  'group relief': ['group loss', 'tax consolidation', 'fiscal unity', 'loss transfer'],
+  'economic substance': ['substance requirements', 'real presence', 'genuine activity'],
 }
 
 /**
