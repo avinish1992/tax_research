@@ -623,14 +623,18 @@ function ChatContent() {
                   })
                 )
               }
-              // Handle filtered sources from backend (after LLM response completes)
-              // This updates sources to only include those actually cited
+              // Handle filtered sources AND content from backend (after LLM response completes)
+              // This updates sources to only include those actually cited, with renumbered content
               if (parsed.filteredSources && parsed.sourcesFiltered) {
                 sources = parsed.filteredSources
+                // Also update the content with renumbered citations if provided
+                if (parsed.filteredContent) {
+                  assistantResponse = parsed.filteredContent
+                }
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === tempAssistantMsgId
-                      ? { ...msg, sources: parsed.filteredSources }
+                      ? { ...msg, sources: parsed.filteredSources, content: parsed.filteredContent || msg.content }
                       : msg
                   )
                 )
@@ -689,13 +693,16 @@ function ChatContent() {
                   })
                 )
               }
-              // Handle filtered sources from backend (buffer processing)
+              // Handle filtered sources AND content from backend (buffer processing)
               if (parsed.filteredSources && parsed.sourcesFiltered) {
                 sources = parsed.filteredSources
+                if (parsed.filteredContent) {
+                  assistantResponse = parsed.filteredContent
+                }
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === tempAssistantMsgId
-                      ? { ...msg, sources: parsed.filteredSources }
+                      ? { ...msg, sources: parsed.filteredSources, content: parsed.filteredContent || msg.content }
                       : msg
                   )
                 )

@@ -703,10 +703,11 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
               finalResponse = filteredResponse
               finalSources = filteredSources
 
-              // Send filtered sources update to frontend
-              // Frontend can use this to replace the initial full sources list
+              // Send filtered sources AND renumbered content to frontend
+              // Frontend uses both to update the message with correct citations
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 filteredSources: filteredSources,
+                filteredContent: filteredResponse,
                 sourcesFiltered: true
               })}\n\n`))
             }
