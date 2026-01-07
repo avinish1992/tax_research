@@ -9,6 +9,16 @@ import {
 } from '@/lib/supabase-db'
 import { createClient } from '@/utils/supabase/server'
 import { classifyQuery, describeClassification } from '@/lib/query-classifier'
+import {
+  retrieveFromMultipleTrees,
+  formatRetrievalAsContext,
+  formatSourcesForDisplay,
+  filterCitedSources,
+  renumberCitations,
+  type DocumentTree,
+  type RetrievalResult,
+  type RetrievalSource,
+} from '@/lib/pageindex'
 
 export const dynamic = 'force-dynamic'
 
@@ -39,108 +49,6 @@ interface LatencyMetrics {
 
 function generateRequestId(): string {
   return `req_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`
-}
-
-/**
- * Extract citation numbers from LLM response
- * Finds all [N] patterns and returns unique numbers
- */
-function extractCitedSources(response: string): number[] {
-  const matches = [...response.matchAll(/\[(\d+)\]/g)]
-  const cited = matches.map(m => parseInt(m[1]))
-  return [...new Set(cited)].sort((a, b) => a - b)
-}
-
-/**
- * Filter sources to only include those actually cited by the LLM
- * Re-numbers sources sequentially [1], [2], [3] and updates response text
- */
-function filterAndRenumberSources(
-  response: string,
-  sources: Array<{
-    index: number
-    fileName: string
-    pageNumber: number | null
-    content: string
-    documentId: string
-    fileUrl: string | null
-    similarity: number
-  }>
-): {
-  filteredResponse: string
-  filteredSources: typeof sources
-  citationMap: Record<number, number> // old index -> new index
-} {
-  const citedIndices = extractCitedSources(response)
-
-  // If no citations found, return minimum sources (top 3 by relevance)
-  if (citedIndices.length === 0) {
-    const topSources = sources.slice(0, 3).map((s, i) => ({ ...s, index: i + 1 }))
-    return {
-      filteredResponse: response,
-      filteredSources: topSources,
-      citationMap: {}
-    }
-  }
-
-  // Filter to only cited sources
-  const citedSources = sources.filter(s => citedIndices.includes(s.index))
-
-  // If somehow no sources matched (shouldn't happen), return top 3
-  if (citedSources.length === 0) {
-    const topSources = sources.slice(0, 3).map((s, i) => ({ ...s, index: i + 1 }))
-    return {
-      filteredResponse: response,
-      filteredSources: topSources,
-      citationMap: {}
-    }
-  }
-
-  // Create mapping from old index to new sequential index
-  const citationMap: Record<number, number> = {}
-  citedSources.forEach((source, i) => {
-    citationMap[source.index] = i + 1
-  })
-
-  // Renumber sources
-  const filteredSources = citedSources.map((s, i) => ({
-    ...s,
-    index: i + 1
-  }))
-
-  // Update response text with new citation numbers
-  let filteredResponse = response
-  // Sort by old index descending to avoid replacement conflicts
-  const sortedOldIndices = Object.keys(citationMap)
-    .map(Number)
-    .sort((a, b) => b - a)
-
-  for (const oldIndex of sortedOldIndices) {
-    const newIndex = citationMap[oldIndex]
-    // Replace [oldIndex] with a temporary placeholder to avoid conflicts
-    const placeholder = `__CITE_${newIndex}__`
-    filteredResponse = filteredResponse.replace(
-      new RegExp(`\\[${oldIndex}\\]`, 'g'),
-      placeholder
-    )
-  }
-
-  // Convert placeholders back to citation format
-  for (let i = 1; i <= filteredSources.length; i++) {
-    filteredResponse = filteredResponse.replace(
-      new RegExp(`__CITE_${i}__`, 'g'),
-      `[${i}]`
-    )
-  }
-
-  console.log(`📋 Citation filtering: ${sources.length} sources → ${filteredSources.length} cited`)
-  console.log(`   Cited indices: [${citedIndices.join(', ')}] → renumbered to [${Object.values(citationMap).join(', ')}]`)
-
-  return {
-    filteredResponse,
-    filteredSources,
-    citationMap
-  }
 }
 
 /**
@@ -286,8 +194,10 @@ export async function POST(request: NextRequest) {
       content: message,
     })
 
-    // Generate embedding for user query and find relevant chunks using hybrid search
-    let relevantChunks: Array<{ content: string; fileName: string; pageNumber: number | null; score: number; documentId: string }> = []
+    // === PAGEINDEX TREE-BASED RETRIEVAL ===
+    // Uses LLM reasoning through document structure instead of vector similarity
+    let retrievalResult: RetrievalResult | null = null
+    let retrievalSources: RetrievalSource[] = []
 
     // === RAG TIMING ===
     const ragStartTime = Date.now()
@@ -296,7 +206,7 @@ export async function POST(request: NextRequest) {
 
     try {
       console.log('\n' + '='.repeat(80))
-      console.log(`🔍 RAG RETRIEVAL PIPELINE [${requestId}]`)
+      console.log(`🌳 PAGEINDEX TREE RETRIEVAL [${requestId}]`)
       console.log('='.repeat(80))
       console.log(`Query: "${message.substring(0, 100)}${message.length > 100 ? '...' : ''}"`)
 
@@ -306,58 +216,127 @@ export async function POST(request: NextRequest) {
         ragQuery = enrichQueryWithContext(message, chatSession.messages)
       }
 
-      // Step 0.5: Classify query for adaptive retrieval
+      // Step 0.5: Classify query for logging
       const classification = classifyQuery(ragQuery)
       console.log(`\n📊 Query Classification: ${describeClassification(classification)}`)
 
-      // Step 1: Query expansion for legal documents
-      const expandedQuery = expandLegalQuery(ragQuery)
+      // Step 1: Fetch document trees for user's documents
+      const supabase = await createClient()
+      console.log('\n📚 Fetching document trees...')
+      const treeStartTime = Date.now()
 
-      // Step 2: Generate embedding using real embedding model
-      console.log('\n📊 Generating semantic embedding...')
-      const embeddingStartTime = Date.now()
-      const queryEmbedding = await generateEmbedding(expandedQuery)
-      metrics.ragEmbeddingTimeMs = Date.now() - embeddingStartTime
-      console.log(`   Embedding generated in ${metrics.ragEmbeddingTimeMs}ms`)
+      const { data: trees, error: treeError } = await supabase
+        .from('document_trees')
+        .select(`
+          id,
+          document_id,
+          tree_json,
+          documents!inner (
+            id,
+            file_name,
+            storage_path,
+            user_id
+          )
+        `)
+        .eq('documents.user_id', user.id)
 
-      // Step 3: Hybrid search (semantic + keyword with RRF fusion)
-      // Use classification.topK for adaptive retrieval (5-15 based on query type)
-      if (queryEmbedding && queryEmbedding.length > 0) {
+      if (treeError) {
+        console.error('Error fetching document trees:', treeError)
+        throw treeError
+      }
+
+      metrics.ragEmbeddingTimeMs = Date.now() - treeStartTime // Reuse for tree fetch time
+      console.log(`   Found ${trees?.length || 0} indexed documents in ${metrics.ragEmbeddingTimeMs}ms`)
+
+      if (trees && trees.length > 0) {
+        // Step 2: Tree-based retrieval using LLM reasoning
+        console.log('\n🤔 Running LLM reasoning through document trees...')
         const searchStartTime = Date.now()
-        const results = await hybridSearch(
-          expandedQuery,
-          queryEmbedding,
-          user.id,
-          classification.topK // Dynamic based on query complexity
-        )
-        metrics.ragSearchTimeMs = Date.now() - searchStartTime
-        console.log(`   Hybrid search completed in ${metrics.ragSearchTimeMs}ms`)
 
-        // Convert to expected format with page numbers and documentId
-        relevantChunks = results.map(r => ({
-          content: r.content,
-          fileName: r.fileName,
-          pageNumber: r.pageNumber,
-          score: r.score,
-          documentId: r.documentId,
+        // Prepare trees with document info for retrieval
+        const treesWithDocs = trees.map(t => ({
+          tree: t.tree_json as DocumentTree,
+          documentId: t.document_id,
+          documentName: (t.documents as any).file_name,
+          storagePath: (t.documents as any).storage_path,
         }))
 
-        console.log('\n✅ RAG retrieval complete')
+        // Retrieve from all document trees using LLM reasoning
+        const multiTreeResult = await retrieveFromMultipleTrees(
+          treesWithDocs.map(t => ({ tree: t.tree, documentId: t.documentId })),
+          ragQuery,
+          {
+            model: 'gpt-4o',
+            maxSourcesPerDoc: 5,
+          }
+        )
+
+        metrics.ragSearchTimeMs = Date.now() - searchStartTime
+        console.log(`   Tree retrieval completed in ${metrics.ragSearchTimeMs}ms`)
+
+        // Use the first result for reasoning info (or aggregate later)
+        if (multiTreeResult.results.length > 0) {
+          const firstResult = multiTreeResult.results[0].result
+          retrievalResult = {
+            node_ids: multiTreeResult.allSources.map(s => s.node_id),
+            reasoning: firstResult.reasoning,
+            confidence: firstResult.confidence,
+            content: multiTreeResult.combinedContent,
+            sources: multiTreeResult.allSources,
+          }
+          console.log(`   Reasoning: ${retrievalResult.reasoning.substring(0, 200)}...`)
+          console.log(`   Confidence: ${retrievalResult.confidence}`)
+          console.log(`   Retrieved ${retrievalResult.sources.length} sections`)
+        }
+
+        retrievalSources = multiTreeResult.allSources
+
+        // Generate signed URLs for documents
+        const documentUrls: Map<string, string | null> = new Map()
+
+        for (const tree of treesWithDocs) {
+          if (tree.storagePath) {
+            const { data: urlData } = await supabase.storage
+              .from('documents')
+              .createSignedUrl(tree.storagePath, 3600)
+            documentUrls.set(tree.documentId, urlData?.signedUrl || null)
+          }
+        }
+
+        // Attach document info to sources for display
+        // Match sources to their documents by finding which tree contains each node
+        retrievalSources = retrievalSources.map(source => {
+          // Find which document this source belongs to
+          const docInfo = multiTreeResult.results.find(r =>
+            r.result.sources.some(s => s.node_id === source.node_id)
+          )
+          const docId = docInfo?.documentId || treesWithDocs[0]?.documentId
+          return {
+            ...source,
+            documentId: docId,
+            fileUrl: documentUrls.get(docId) || null,
+          }
+        }) as any
+
+        console.log('\n✅ Tree retrieval complete')
+        console.log('='.repeat(80) + '\n')
+      } else {
+        console.log('\n⚠️ No indexed documents found for user')
         console.log('='.repeat(80) + '\n')
       }
-    } catch (embeddingError) {
-      console.error('❌ Error in RAG pipeline:', embeddingError)
-      console.log('   Continuing without RAG context...\n')
-      // Continue without RAG context if embedding fails
+    } catch (retrievalError) {
+      console.error('❌ Error in tree retrieval pipeline:', retrievalError)
+      console.log('   Continuing without context...\n')
+      // Continue without context if retrieval fails
     }
 
     metrics.ragTotalTimeMs = Date.now() - ragStartTime
-    metrics.ragChunksRetrieved = relevantChunks.length
+    metrics.ragChunksRetrieved = retrievalSources.length
 
-    // Build context from relevant chunks with numbered sources
+    // Build context from tree-based retrieval sources
     let contextText = ''
 
-    // Create a deduplicated list of sources for citations
+    // Create sources list for citations (PageIndex format)
     const sourcesList: Array<{
       index: number
       fileName: string
@@ -365,56 +344,55 @@ export async function POST(request: NextRequest) {
       content: string
       documentId: string
       fileUrl: string | null
-      similarity: number  // RRF score for relevance-based ordering
+      similarity: number
+      // New PageIndex fields for enhanced citations
+      sectionPath: string
+      title: string
+      pageRange: { start: number; end: number }
+      summary?: string
+      nodeId: string
     }> = []
 
-    if (relevantChunks.length > 0) {
-      // Get unique document IDs and fetch their storage paths for PDF preview
-      const uniqueDocIds = [...new Set(relevantChunks.map(c => c.documentId))]
-      const documentUrls: Map<string, string | null> = new Map()
-
-      try {
-        const supabase = await createClient()
-
-        // Fetch documents to get storage paths
-        const { data: documents } = await supabase
-          .from('documents')
-          .select('id, storage_path')
-          .in('id', uniqueDocIds)
-
-        if (documents) {
-          // Generate signed URLs for each document (valid for 1 hour)
-          for (const doc of documents) {
-            const { data: urlData } = await supabase.storage
-              .from('documents')
-              .createSignedUrl(doc.storage_path, 3600)
-            documentUrls.set(doc.id, urlData?.signedUrl || null)
-          }
-        }
-      } catch (urlError) {
-        console.error('Error generating document URLs:', urlError)
-        // Continue without URLs - PDF preview will fall back to text view
-      }
-
-      // Format context clearly with numbered sources for citation
+    if (retrievalSources.length > 0) {
+      // Format context using PageIndex's structured format
       contextText = '\n\n=== UPLOADED LEGAL DOCUMENTS ===\n\n'
-      relevantChunks.forEach((chunk, index) => {
-        const sourceNum = index + 1
-        const pageInfo = chunk.pageNumber ? ` (Page ${chunk.pageNumber})` : ''
-        contextText += `[${sourceNum}] Source: ${chunk.fileName}${pageInfo}\n${chunk.content}\n\n---\n\n`
 
-        // Add to sources list for frontend with documentId, fileUrl, and similarity score
+      retrievalSources.forEach((source, index) => {
+        const sourceNum = index + 1
+        const pageRange = `Pages ${source.pages.start}-${source.pages.end}`
+
+        // Rich context format with section hierarchy
+        contextText += `[${sourceNum}] ${source.section_path}\n`
+        contextText += `    ${pageRange}\n`
+        if (source.summary) {
+          contextText += `    Summary: ${source.summary}\n`
+        }
+        contextText += `\n${source.content}\n\n---\n\n`
+
+        // Add to sources list with enhanced PageIndex metadata
         sourcesList.push({
           index: sourceNum,
-          fileName: chunk.fileName,
-          pageNumber: chunk.pageNumber,
-          content: chunk.content.substring(0, 500) + (chunk.content.length > 500 ? '...' : ''),
-          documentId: chunk.documentId,
-          fileUrl: documentUrls.get(chunk.documentId) || null,
-          similarity: chunk.score  // Include RRF relevance score for tiered display
+          fileName: source.title,
+          pageNumber: source.pages.start,
+          content: source.content.substring(0, 500) + (source.content.length > 500 ? '...' : ''),
+          documentId: (source as any).documentId || '',
+          fileUrl: (source as any).fileUrl || null,
+          similarity: 1.0, // Tree retrieval doesn't use similarity scores
+          // PageIndex-specific fields
+          sectionPath: source.section_path,
+          title: source.title,
+          pageRange: source.pages,
+          summary: source.summary,
+          nodeId: source.node_id,
         })
       })
+
       contextText += '=== END OF DOCUMENTS ===\n\n'
+
+      // Add reasoning context for the LLM
+      if (retrievalResult?.reasoning) {
+        contextText += `\n[Retrieval Reasoning: ${retrievalResult.reasoning}]\n\n`
+      }
     }
 
     // Detect if user wants exact quotes
@@ -477,13 +455,20 @@ QUOTE MODE ACTIVE - The user wants exact text from documents:
 - Format each quote with its source reference immediately after
 - Example format:
   > "This is the exact text from the document..."
-  — Source: Document Name [1], Page X
+  — Source: Section Name [1], Pages X-Y
 
 - Include multiple relevant excerpts if the content spans several sections
 - Preserve the original formatting and punctuation
 - If the exact requested text isn't found, quote the closest relevant content and explain
 ` : ''}
-${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source numbers [1], [2], etc. when citing:' : 'NOTE: No relevant documents found for this query. If this is a tax-related question, suggest the user upload relevant documents or rephrase. If off-topic, politely redirect.'}`
+${retrievalSources.length > 0 ? `DOCUMENT CONTEXT PROVIDED BELOW - The AI has analyzed your documents and identified the most relevant sections using reasoning-based retrieval.
+
+Each source shows:
+- Section hierarchy path (e.g., "Chapter 4 > Article 12 > Penalties")
+- Page range where the content appears
+- The actual text content
+
+Use the source numbers [1], [2], etc. when citing specific information:` : 'NOTE: No relevant documents found for this query. If this is a tax-related question, suggest the user upload relevant documents or rephrase. If off-topic, politely redirect.'}`
 
     const messages = [
       { role: 'system', content: systemPrompt + contextText },
@@ -689,25 +674,48 @@ ${relevantChunks.length > 0 ? 'DOCUMENT CONTEXT PROVIDED BELOW - Use the source 
 
           // Save assistant message (using Supabase) with sources in metadata
           if (fullResponse) {
-            // === CITATION VALIDATION ===
+            // === CITATION VALIDATION (PageIndex) ===
             // Filter sources to only include those actually cited by the LLM
-            // This ensures users only see relevant sources, not all 10 retrieved
+            // This ensures users only see relevant sources, not all retrieved
             let finalResponse = fullResponse
             let finalSources = sourcesList
 
-            if (sourcesList.length > 0) {
-              const { filteredResponse, filteredSources } = filterAndRenumberSources(
+            if (retrievalSources.length > 0 && sourcesList.length > 0) {
+              // Use PageIndex filtering which understands section-based citations
+              const citedRetrievalSources = filterCitedSources(fullResponse, retrievalSources)
+
+              // Renumber citations in the response to be sequential
+              // renumberCitations(response, originalSources, filteredSources) -> string
+              const renumberedResponse = renumberCitations(
                 fullResponse,
-                sourcesList
+                retrievalSources,
+                citedRetrievalSources
               )
-              finalResponse = filteredResponse
-              finalSources = filteredSources
+
+              finalResponse = renumberedResponse
+
+              // Rebuild sourcesList with only cited sources, properly renumbered
+              finalSources = citedRetrievalSources.map((source, index) => ({
+                index: index + 1,
+                fileName: source.title,
+                pageNumber: source.pages.start,
+                content: source.content.substring(0, 500) + (source.content.length > 500 ? '...' : ''),
+                documentId: (source as any).documentId || '',
+                fileUrl: (source as any).fileUrl || null,
+                similarity: 1.0,
+                sectionPath: source.section_path,
+                title: source.title,
+                pageRange: source.pages,
+                summary: source.summary,
+                nodeId: source.node_id,
+              }))
+
+              console.log(`📋 Citation filtering: ${sourcesList.length} sources → ${finalSources.length} cited`)
 
               // Send filtered sources AND renumbered content to frontend
-              // Frontend uses both to update the message with correct citations
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
-                filteredSources: filteredSources,
-                filteredContent: filteredResponse,
+                filteredSources: finalSources,
+                filteredContent: finalResponse,
                 sourcesFiltered: true
               })}\n\n`))
             }

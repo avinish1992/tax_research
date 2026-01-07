@@ -49,6 +49,12 @@ interface Source {
   similarity?: number
   documentId?: string
   fileUrl?: string
+  // PageIndex-specific fields for enhanced citations
+  sectionPath?: string     // e.g., "Chapter 4 > Article 12 > Penalties"
+  title?: string           // Section title
+  pageRange?: { start: number; end: number }
+  summary?: string         // AI-generated section summary
+  nodeId?: string          // Tree node ID for reference
 }
 
 interface Document {
@@ -145,33 +151,49 @@ const CitationPopover = ({
 
       {/* Hover tooltip - lightweight preview */}
       {showTooltip && !isOpen && source && (
-        <div className="absolute z-40 left-0 top-full mt-1 w-64 px-2.5 py-2 bg-foreground text-background text-[11px] rounded-md shadow-lg pointer-events-none animate-in fade-in zoom-in-95 duration-100">
+        <div className="absolute z-40 left-0 top-full mt-1 w-72 px-2.5 py-2 bg-foreground text-background text-[11px] rounded-md shadow-lg pointer-events-none animate-in fade-in zoom-in-95 duration-100">
           <div className="flex items-center gap-1.5 mb-1">
             <svg className="w-3 h-3 opacity-70 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
             </svg>
-            <span className="font-medium truncate">{source.fileName}</span>
-            {source.pageNumber && (
-              <span className="opacity-70">· p{source.pageNumber}</span>
-            )}
+            {/* Show section path if available (PageIndex), otherwise filename */}
+            <span className="font-medium truncate">{source.sectionPath || source.title || source.fileName}</span>
           </div>
-          <p className="opacity-80 italic leading-snug">"{tooltipPreview}"</p>
+          {/* Show page range for PageIndex sources */}
+          {source.pageRange ? (
+            <span className="opacity-70 text-[10px]">Pages {source.pageRange.start}-{source.pageRange.end}</span>
+          ) : source.pageNumber && (
+            <span className="opacity-70 text-[10px]">Page {source.pageNumber}</span>
+          )}
+          <p className="opacity-80 italic leading-snug mt-1">"{tooltipPreview}"</p>
           <p className="mt-1 opacity-50 text-[10px]">Click for more</p>
         </div>
       )}
 
       {/* Click popover - full details */}
       {isOpen && source && (
-        <div className="absolute z-50 left-0 top-full mt-1 w-80 bg-card border border-border rounded-lg shadow-lg animate-in fade-in slide-in-from-top-1 duration-150">
-          {/* Header */}
+        <div className="absolute z-50 left-0 top-full mt-1 w-96 bg-card border border-border rounded-lg shadow-lg animate-in fade-in slide-in-from-top-1 duration-150">
+          {/* Header - Show section hierarchy for PageIndex */}
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border/50 bg-muted/30 rounded-t-lg">
             <svg className="w-4 h-4 text-primary flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
             </svg>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-foreground truncate">{source.fileName}</p>
-              {source.pageNumber && (
-                <p className="text-[10px] text-muted-foreground">Page {source.pageNumber}</p>
+              {/* Show section path for PageIndex sources */}
+              {source.sectionPath ? (
+                <>
+                  <p className="text-xs font-medium text-foreground truncate">{source.sectionPath}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    Pages {source.pageRange?.start}-{source.pageRange?.end}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="text-xs font-medium text-foreground truncate">{source.fileName}</p>
+                  {source.pageNumber && (
+                    <p className="text-[10px] text-muted-foreground">Page {source.pageNumber}</p>
+                  )}
+                </>
               )}
             </div>
             <button
@@ -184,7 +206,15 @@ const CitationPopover = ({
             </button>
           </div>
 
-          {/* Content */}
+          {/* Summary for PageIndex sources */}
+          {source.summary && (
+            <div className="px-3 py-2 border-b border-border/30 bg-primary/5">
+              <p className="text-[10px] font-medium text-primary/80 uppercase tracking-wide mb-1">Summary</p>
+              <p className="text-xs text-foreground/80 leading-relaxed">{source.summary}</p>
+            </div>
+          )}
+
+          {/* Content excerpt */}
           <div className="px-3 py-2.5">
             <p className="text-xs text-muted-foreground italic leading-relaxed">
               "{fullPreview}"
@@ -225,12 +255,14 @@ const TieredSourcesDisplay = ({
   const topSources = sortedSources.slice(0, 5)
   const otherSources = sortedSources.slice(5)
 
-  // Group sources by fileName
+  // Group sources by fileName, but for PageIndex sources also show section info
   const groupSourcesByFile = (sourcesToGroup: Source[]) => {
-    const grouped = new Map<string, { fileName: string; sources: Source[] }>()
+    const grouped = new Map<string, { fileName: string; sources: Source[]; isPageIndex: boolean }>()
     sourcesToGroup.forEach(source => {
+      // Check if this is a PageIndex source (has sectionPath)
+      const isPageIndex = !!source.sectionPath
       if (!grouped.has(source.fileName)) {
-        grouped.set(source.fileName, { fileName: source.fileName, sources: [] })
+        grouped.set(source.fileName, { fileName: source.fileName, sources: [], isPageIndex })
       }
       grouped.get(source.fileName)!.sources.push(source)
     })
@@ -259,7 +291,11 @@ const TieredSourcesDisplay = ({
                   key={source.index}
                   onClick={() => onSourceClick(source)}
                   className="w-5 h-5 flex items-center justify-center bg-primary/10 text-primary text-[10px] font-semibold rounded hover:bg-primary/20 transition-colors"
-                  title={source.pageNumber ? `Page ${source.pageNumber}` : `Source ${source.index}`}
+                  title={source.sectionPath
+                    ? `${source.sectionPath} (Pages ${source.pageRange?.start}-${source.pageRange?.end})`
+                    : source.pageNumber
+                      ? `Page ${source.pageNumber}`
+                      : `Source ${source.index}`}
                 >
                   {source.index}
                 </button>

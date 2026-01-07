@@ -4,6 +4,7 @@ import { smartExtractText, chunkPages, isSupportedFileType, getSupportedFormatsT
 import { generateEmbedding } from '@/lib/supabase-rag'
 import { getAuthenticatedUser } from '@/lib/supabase-auth'
 import { createClient } from '@/utils/supabase/server'
+import { indexDocument } from '@/lib/pageindex'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300 // 5 minutes for large documents
@@ -224,14 +225,65 @@ export async function POST(request: NextRequest) {
     const processingTime = ((Date.now() - startTime) / 1000).toFixed(1)
     console.log(`Embedding generation completed in ${processingTime}s`)
 
-    // Mark document as completed
+    // === PAGEINDEX TREE INDEXING ===
+    // Build hierarchical tree structure for reasoning-based retrieval
+    console.log('Building PageIndex tree structure...')
+    let treeIndexed = false
+    let treeError: string | null = null
+
+    try {
+      // Only index PDFs with tree structure (for now)
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        const treeStartTime = Date.now()
+
+        // Build document tree using PageIndex
+        const documentTree = await indexDocument(buffer, file.name, {
+          model: 'gpt-4o',
+          add_node_id: true,
+          add_node_text: true,
+          add_node_summary: true,
+          add_doc_description: true,
+        })
+
+        // Store tree in database
+        const { error: treeInsertError } = await supabase
+          .from('document_trees')
+          .insert({
+            document_id: documentId,
+            tree_json: documentTree,
+            model_used: 'gpt-4o',
+          })
+
+        if (treeInsertError) {
+          console.error('Failed to store document tree:', treeInsertError)
+          treeError = treeInsertError.message
+        } else {
+          treeIndexed = true
+          const treeTime = ((Date.now() - treeStartTime) / 1000).toFixed(1)
+          console.log(`PageIndex tree built in ${treeTime}s`)
+          console.log(`Tree structure: ${documentTree.structure.length} top-level sections`)
+        }
+      } else {
+        console.log('Skipping tree indexing for non-PDF file')
+      }
+    } catch (treeErr: any) {
+      console.error('Tree indexing failed:', treeErr.message)
+      treeError = treeErr.message
+      // Don't fail the upload - vector search still works
+    }
+
+    // Mark document as completed with tree status
     await supabase.from('documents').update({
       status: 'completed',
       chunk_count: chunks.length,
-      processed_at: new Date().toISOString()
+      processed_at: new Date().toISOString(),
+      tree_indexed: treeIndexed,
+      tree_indexed_at: treeIndexed ? new Date().toISOString() : null,
+      tree_indexing_error: treeError,
     }).eq('id', documentId)
 
     console.log('=== Document processed successfully ===')
+    console.log(`   Chunks: ${chunks.length}, Tree indexed: ${treeIndexed}`)
 
     return NextResponse.json({
       message: 'Document uploaded and processed successfully',
@@ -240,7 +292,9 @@ export async function POST(request: NextRequest) {
         fileName: file.name,
         uploadedAt: document.uploaded_at,
         chunkCount: chunks.length,
-        processingTime: `${processingTime}s`
+        processingTime: `${processingTime}s`,
+        treeIndexed,
+        treeError,
       },
     })
   } catch (error: any) {
