@@ -6,7 +6,10 @@
  */
 
 import { PageContent } from './types';
-import { encoding_for_model } from 'tiktoken';
+import { getEncoding } from 'js-tiktoken';
+
+// Use cl100k_base encoding (used by GPT-4, GPT-3.5-turbo)
+const encoder = getEncoding('cl100k_base');
 
 /**
  * Extract text from PDF buffer with page-level granularity
@@ -26,7 +29,6 @@ export async function extractPagesFromPDF(buffer: Buffer): Promise<PageContent[]
     });
 
     const pages: PageContent[] = [];
-    const encoder = encoding_for_model('gpt-4o');
 
     if (Array.isArray(text)) {
       text.forEach((pageText, index) => {
@@ -47,8 +49,6 @@ export async function extractPagesFromPDF(buffer: Buffer): Promise<PageContent[]
         token_count: tokens.length,
       });
     }
-
-    encoder.free();
 
     const totalTokens = pages.reduce((sum, p) => sum + p.token_count, 0);
     console.log('PageIndex: PDF extraction complete');
@@ -156,14 +156,11 @@ export function groupPagesIntoChunks(
 }
 
 /**
- * Count tokens in text using tiktoken
+ * Count tokens in text using js-tiktoken (serverless-compatible)
  */
 export function countTokens(text: string): number {
   if (!text) return 0;
-  const encoder = encoding_for_model('gpt-4o');
-  const tokens = encoder.encode(text);
-  encoder.free();
-  return tokens.length;
+  return encoder.encode(text).length;
 }
 
 /**
