@@ -1110,9 +1110,18 @@ Use the source numbers [1], [2], etc. when citing specific information:` : 'NOTE
       },
     })
   } catch (error) {
-    console.error('Chat error:', error)
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    const errorStack = error instanceof Error ? error.stack : undefined
+    console.error('Chat error:', errorMessage)
+    console.error('Stack trace:', errorStack)
+
+    // Include error details in response for debugging
     return NextResponse.json(
-      { error: 'Failed to process chat message' },
+      {
+        error: 'Failed to process chat message',
+        details: process.env.NODE_ENV === 'development' ? errorMessage : undefined,
+        debug: errorMessage // Temporarily include for production debugging
+      },
       { status: 500 }
     )
   }
