@@ -185,6 +185,120 @@ GOOGLE_CLIENT_SECRET= # OAuth
 
 ---
 
+## ⚠️ RAG ACCURACY TESTING (CRITICAL)
+
+**When testing RAG accuracy, ALWAYS use the curated test dataset:**
+
+```
+nextjs_space/tests/test-dataset.json   # 234 unique questions (primary)
+nextjs_space/tests/test-dataset.csv    # Same data for spreadsheet review
+```
+
+**DO NOT create new test files.** All questions are curated in these files.
+
+### Dataset Structure
+
+Each question includes:
+```json
+{
+  "id": "Q001",
+  "query": "What is the corporate tax rate?",
+  "category": "basic",
+  "difficulty": "easy|medium|hard|special",
+  "question_type": "factual|procedural|comparative|scenario|...",
+  "expected_keywords": ["9%", "375,000"],
+  "ground_truth": "9% for income above AED 375,000",
+  "expected_articles": ["Article 3"],
+  "source_documents": [
+    {"filename": "Federal-Decree-Law-No.-47-of-2022-EN.pdf", "pages": null, "sections": null}
+  ],
+  "curation": {
+    "status": "active|deprecated|needs_review|draft",
+    "quality_score": 1-5,
+    "last_reviewed": "2026-01-10",
+    "reviewer_notes": null
+  }
+}
+```
+
+### Dataset Statistics (234 questions)
+
+| Difficulty | Count | | Question Type | Count |
+|------------|-------|--|---------------|-------|
+| Medium | 98 | | General | 78 |
+| Easy | 64 | | Factual | 52 |
+| Hard | 49 | | Procedural | 48 |
+| Special | 23 | | Yes/No | 24 |
+
+### Running Accuracy Tests
+
+**Preferred Method: Node.js Script** (faster, more reliable)
+
+```bash
+cd nextjs_space
+
+# Quick test (10 questions, ~3-4 min)
+node scripts/run-accuracy-test.js
+
+# Medium test (50 questions, ~15-20 min)
+node scripts/run-accuracy-test.js --limit 50
+
+# Full test (all 234 questions, ~60-90 min)
+node scripts/run-accuracy-test.js --limit all
+
+# Filter by category or difficulty
+node scripts/run-accuracy-test.js --category basic --limit 20
+node scripts/run-accuracy-test.js --difficulty easy
+
+# Run specific questions
+node scripts/run-accuracy-test.js --id Q001,Q002,Q003
+
+# Verbose mode (show full responses)
+node scripts/run-accuracy-test.js --limit 10 --verbose
+```
+
+**Reports Location:**
+```
+tests/accuracy-reports/
+├── latest-report.json       # Always updated with latest run
+├── latest-report.md         # Human-readable latest report
+└── accuracy-report-{timestamp}.json/.md  # Historical reports
+```
+
+**Alternative: Single query test**
+```bash
+curl -X POST http://localhost:5000/api/test/accuracy \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the corporate tax rate?"}'
+```
+
+### Curating the Dataset
+
+**Adding new questions:**
+1. Edit `test-dataset.json`
+2. Add to `questions` array with `status: "draft"`
+3. Fill in: query, category, expected_keywords, source_documents
+4. After testing, change status to `"active"`
+
+**Updating existing questions:**
+1. Find by ID (Q001, Q002, etc.)
+2. Update fields as needed
+3. Set `last_reviewed` to today's date
+4. Add notes in `reviewer_notes`
+
+**Deprecating questions:**
+1. Set `status: "deprecated"` (keeps history)
+2. Tests automatically skip deprecated questions
+
+**Quality scores (1-5):**
+- 1: Poor - vague or duplicate
+- 2: Below average - needs improvement
+- 3: Average - acceptable
+- 4: Good - well-formed
+- 5: Excellent - ideal test case
+
+---
+
 ## References
 
 - @research/application/architecture/RECOMMENDED_ARCHITECTURE.md

@@ -1,14 +1,20 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedUser } from '@/lib/supabase-auth'
-import { generateEmbedding, hybridSearch, expandLegalQuery } from '@/lib/supabase-rag'
+// NOTE: supabase-rag (vector-based) replaced by PageIndex tree-based retrieval
 import {
   getChatSessionWithMessages,
   createMessage,
   updateChatSessionTimestamp,
 } from '@/lib/supabase-db'
 import { createClient } from '@/utils/supabase/server'
-import { classifyQuery, describeClassification } from '@/lib/query-classifier'
+import { classifyQuery as classifyQueryParams, describeClassification } from '@/lib/query-classifier'
+import {
+  quickOffTopicFilter,
+  shouldProceedWithResponse,
+  OFF_TOPIC_RESPONSES,
+  type OffTopicCheckResult,
+} from '@/lib/pageindex/retrieval-confidence-gate'
 import {
   retrieveFromMultipleTrees,
   formatRetrievalAsContext,
@@ -19,6 +25,7 @@ import {
   type RetrievalResult,
   type RetrievalSource,
 } from '@/lib/pageindex'
+import OpenAI from 'openai'
 
 export const dynamic = 'force-dynamic'
 
@@ -145,6 +152,137 @@ function enrichQueryWithContext(
   return message
 }
 
+/**
+ * Pre-filter documents based on query relevance using keyword matching
+ * This reduces the number of expensive LLM calls by only processing likely-relevant documents
+ */
+interface DocumentWithTree {
+  tree: DocumentTree
+  documentId: string
+  documentName: string
+  storagePath: string
+  docDescription?: string
+}
+
+function preFilterDocuments(
+  documents: DocumentWithTree[],
+  query: string,
+  maxDocs: number = 10
+): DocumentWithTree[] {
+  const queryLower = query.toLowerCase()
+
+  // Check if query mentions specific articles (e.g., "Article 50", "Article 23")
+  const articleMatch = queryLower.match(/article\s*(\d+)/i)
+  const hasArticleReference = !!articleMatch
+
+  // Extract key terms from query (remove common words)
+  const stopWords = new Set(['what', 'are', 'the', 'in', 'of', 'to', 'for', 'is', 'a', 'an', 'and', 'or', 'how', 'does', 'do', 'can', 'uae', 'under', 'about', 'say', 'says'])
+  const queryTerms = queryLower
+    .split(/\s+/)
+    .filter(term => term.length > 2 && !stopWords.has(term))
+
+  // Score each document based on term matches
+  const scoredDocs = documents.map(doc => {
+    let score = 0
+    const fileName = doc.documentName.toLowerCase()
+    const description = (doc.docDescription || '').toLowerCase()
+
+    for (const term of queryTerms) {
+      // Higher weight for filename matches
+      if (fileName.includes(term)) {
+        score += 10
+      }
+      // Medium weight for description matches
+      if (description.includes(term)) {
+        score += 5
+      }
+    }
+
+    // Bonus for exact multi-word phrase matches
+    const phrases = [
+      'transfer pricing', 'free zone', 'tax group', 'withholding tax',
+      'small business', 'participation exemption', 'qualifying income',
+      'permanent establishment', 'anti-abuse', 'gaar', 'general anti',
+      'tax registration', 'tax residency', 'taxable income', 'exempt income',
+      'related parties', 'connected persons', 'qualifying investment'
+    ]
+    for (const phrase of phrases) {
+      if (queryLower.includes(phrase)) {
+        if (fileName.includes(phrase.replace(' ', '-')) || fileName.includes(phrase.replace(' ', '_')) || fileName.includes(phrase)) {
+          score += 20
+        }
+        if (description.includes(phrase)) {
+          score += 15
+        }
+      }
+    }
+
+    // Core law documents - ALWAYS include with high priority when:
+    // 1. Query references specific articles
+    // 2. Query mentions general concepts that are in the main law
+    const isCoreDoc = fileName.includes('federal-decree-law') ||
+      (fileName.includes('corporate tax') && fileName.includes('general'))
+
+    if (isCoreDoc) {
+      if (hasArticleReference) {
+        // When asking about specific articles, core law docs are essential
+        score += 50
+      } else {
+        // General questions - include core docs but don't dominate
+        score += 5
+      }
+    }
+
+    // Executive Regulation is also important for article references
+    if (hasArticleReference && fileName.includes('executive regulation')) {
+      score += 30
+    }
+
+    return { doc, score }
+  })
+
+  // Sort by score descending
+  scoredDocs.sort((a, b) => b.score - a.score)
+
+  // Take top scoring documents
+  let filtered = scoredDocs
+    .filter(d => d.score > 0)
+    .slice(0, maxDocs)
+    .map(d => d.doc)
+
+  // If article reference but not enough docs, ensure core docs are included
+  if (hasArticleReference && filtered.length < 3) {
+    const coreDocs = documents.filter(d => {
+      const name = d.documentName.toLowerCase()
+      return name.includes('federal-decree-law') || name.includes('executive regulation')
+    })
+    const existingIds = new Set(filtered.map(d => d.documentId))
+    for (const coreDoc of coreDocs) {
+      if (!existingIds.has(coreDoc.documentId)) {
+        filtered.push(coreDoc)
+        if (filtered.length >= maxDocs) break
+      }
+    }
+  }
+
+  // If no matches at all, fall back to core documents
+  if (filtered.length === 0) {
+    const coreDocs = documents.filter(d => {
+      const name = d.documentName.toLowerCase()
+      return name.includes('corporate tax') || name.includes('federal-decree-law')
+    }).slice(0, 5)
+    return coreDocs.length > 0 ? coreDocs : documents.slice(0, maxDocs)
+  }
+
+  console.log(`   📑 Pre-filtered ${documents.length} documents → ${filtered.length} (max 3 for optimal accuracy/speed)`)
+  console.log(`   Top matches: ${filtered.slice(0, 3).map(d => d.documentName).join(', ')}`)
+  if (hasArticleReference) {
+    console.log(`   🔍 Article reference detected: Article ${articleMatch![1]}`)
+  }
+
+  return filtered
+}
+
 export async function POST(request: NextRequest) {
   const requestStartTime = Date.now()
   const requestId = generateRequestId()
@@ -194,10 +332,83 @@ export async function POST(request: NextRequest) {
       content: message,
     })
 
+    // === QUICK OFF-TOPIC FILTER (PageIndex-Aligned) ===
+    // Only filter truly off-topic queries (programming, weather, VAT)
+    // Domain-specific terms (GAAR, QFZP, etc.) go to retrieval - no keyword maintenance needed
+    const offTopicCheck = quickOffTopicFilter(message)
+
+    if (offTopicCheck.isOffTopic) {
+      console.log(`\n⛔ Quick off-topic filter: ${offTopicCheck.category}`)
+      console.log(`   Reason: ${offTopicCheck.reason}`)
+
+      const declineResponse = OFF_TOPIC_RESPONSES[offTopicCheck.category || 'other_domain']
+
+      // Save the decline response as assistant message
+      const assistantMessage = await createMessage({
+        chatSessionId,
+        role: 'assistant',
+        content: declineResponse,
+        metadata: {
+          offTopicFilter: {
+            category: offTopicCheck.category,
+            reason: offTopicCheck.reason,
+          }
+        },
+      })
+
+      await updateChatSessionTimestamp(chatSessionId)
+
+      // Return as streaming response (for consistency with frontend)
+      const encoder = new TextEncoder()
+      const stream = new ReadableStream({
+        start(controller) {
+          // Send filter info
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            offTopicFilter: {
+              category: offTopicCheck.category,
+              reason: offTopicCheck.reason,
+              action: 'declined'
+            }
+          })}\n\n`))
+
+          // Send response as streaming tokens (simulate)
+          const words = declineResponse.split(' ')
+          for (const word of words) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              choices: [{ delta: { content: word + ' ' } }]
+            })}\n\n`))
+          }
+
+          // Send message IDs
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+            messageIds: {
+              userMessageId: userMessage.id,
+              assistantMessageId: assistantMessage.id,
+            }
+          })}\n\n`))
+
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+          controller.close()
+        }
+      })
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache, no-transform',
+          'Connection': 'keep-alive',
+        },
+      })
+    }
+
+    // Get previous messages for context enrichment
+    const previousMessages = chatSession?.messages?.map((m: { content: string }) => m.content) || []
+
     // === PAGEINDEX TREE-BASED RETRIEVAL ===
     // Uses LLM reasoning through document structure instead of vector similarity
     let retrievalResult: RetrievalResult | null = null
     let retrievalSources: RetrievalSource[] = []
+    let documentTreeCount = 0 // Track tree count for thinking display
 
     // === RAG TIMING ===
     const ragStartTime = Date.now()
@@ -216,9 +427,9 @@ export async function POST(request: NextRequest) {
         ragQuery = enrichQueryWithContext(message, chatSession.messages)
       }
 
-      // Step 0.5: Classify query for logging
-      const classification = classifyQuery(ragQuery)
-      console.log(`\n📊 Query Classification: ${describeClassification(classification)}`)
+      // Step 0.5: Classify query for retrieval parameters (topK, similarity)
+      const retrieverClassification = classifyQueryParams(ragQuery)
+      console.log(`\n📊 Retrieval Parameters: ${describeClassification(retrieverClassification)}`)
 
       // Step 1: Fetch document trees for user's documents
       const supabase = await createClient()
@@ -246,7 +457,8 @@ export async function POST(request: NextRequest) {
       }
 
       metrics.ragEmbeddingTimeMs = Date.now() - treeStartTime // Reuse for tree fetch time
-      console.log(`   Found ${trees?.length || 0} indexed documents in ${metrics.ragEmbeddingTimeMs}ms`)
+      documentTreeCount = trees?.length || 0
+      console.log(`   Found ${documentTreeCount} indexed documents in ${metrics.ragEmbeddingTimeMs}ms`)
 
       if (trees && trees.length > 0) {
         // Step 2: Tree-based retrieval using LLM reasoning
@@ -254,33 +466,54 @@ export async function POST(request: NextRequest) {
         const searchStartTime = Date.now()
 
         // Prepare trees with document info for retrieval
-        const treesWithDocs = trees.map(t => ({
+        const allTreesWithDocs: DocumentWithTree[] = trees.map(t => ({
           tree: t.tree_json as DocumentTree,
           documentId: t.document_id,
           documentName: (t.documents as any).file_name,
           storagePath: (t.documents as any).storage_path,
+          docDescription: (t.tree_json as any).doc_description || '',
         }))
 
-        // Retrieve from all document trees using LLM reasoning
+        // Pre-filter documents based on query relevance
+        // Optimal config: 3 docs based on pipeline comparison testing
+        // 3-docs achieved 96.7% pass rate vs 70% for 1-doc, with minimal latency increase
+        const treesWithDocs = preFilterDocuments(allTreesWithDocs, ragQuery, 3)
+
+        // Retrieve from filtered document trees using LLM reasoning
+        // Uses gpt-4o-mini for retrieval (faster/cheaper), response uses gpt-4o-mini
         const multiTreeResult = await retrieveFromMultipleTrees(
           treesWithDocs.map(t => ({ tree: t.tree, documentId: t.documentId })),
           ragQuery,
           {
-            model: 'gpt-4o',
-            maxSourcesPerDoc: 5,
+            model: 'gpt-4o-mini',  // Changed from gpt-4o for cost efficiency
+            maxSourcesPerDoc: 3,   // Reduced from 5 based on testing
           }
         )
 
         metrics.ragSearchTimeMs = Date.now() - searchStartTime
         console.log(`   Tree retrieval completed in ${metrics.ragSearchTimeMs}ms`)
 
-        // Use the first result for reasoning info (or aggregate later)
+        // Use the result with highest confidence (then most sources) for reasoning
         if (multiTreeResult.results.length > 0) {
-          const firstResult = multiTreeResult.results[0].result
+          // Sort by confidence first, then by source count
+          // High confidence with few sources is better than medium with many
+          const sortedResults = [...multiTreeResult.results].sort((a, b) => {
+            // First compare by confidence
+            const confidenceOrder: Record<string, number> = { high: 3, medium: 2, low: 1 }
+            const confDiff = (confidenceOrder[b.result.confidence] || 0) - (confidenceOrder[a.result.confidence] || 0)
+            if (confDiff !== 0) return confDiff
+
+            // Then by source count if same confidence
+            return b.result.sources.length - a.result.sources.length
+          })
+
+          const bestResult = sortedResults[0].result
+          console.log(`   Best result from doc ${sortedResults[0].documentId}: ${bestResult.sources.length} sources, ${bestResult.confidence} confidence`)
+
           retrievalResult = {
             node_ids: multiTreeResult.allSources.map(s => s.node_id),
-            reasoning: firstResult.reasoning,
-            confidence: firstResult.confidence,
+            reasoning: bestResult.reasoning,
+            confidence: bestResult.confidence,
             content: multiTreeResult.combinedContent,
             sources: multiTreeResult.allSources,
           }
@@ -332,6 +565,77 @@ export async function POST(request: NextRequest) {
 
     metrics.ragTotalTimeMs = Date.now() - ragStartTime
     metrics.ragChunksRetrieved = retrievalSources.length
+
+    // === RETRIEVAL CONFIDENCE GATE (PageIndex-Aligned) ===
+    // Use retrieval results to determine if query is answerable
+    // This replaces keyword-based intent classification
+    if (retrievalResult) {
+      const confidenceGate = shouldProceedWithResponse(retrievalResult)
+      console.log(`\n🚦 Confidence Gate: ${confidenceGate.proceed ? 'PROCEED' : 'LOW CONFIDENCE'}`)
+      console.log(`   Reason: ${confidenceGate.reason}`)
+
+      if (!confidenceGate.proceed && confidenceGate.suggestedResponse) {
+        console.log(`\n⚠️ Low confidence retrieval - returning graceful response`)
+
+        // Save the low-confidence response as assistant message
+        const assistantMessage = await createMessage({
+          chatSessionId,
+          role: 'assistant',
+          content: confidenceGate.suggestedResponse,
+          metadata: {
+            retrievalConfidence: {
+              confidence: retrievalResult.confidence,
+              sourceCount: retrievalResult.sources.length,
+              reason: confidenceGate.reason,
+            }
+          },
+        })
+
+        await updateChatSessionTimestamp(chatSessionId)
+
+        // Return as streaming response
+        const encoder = new TextEncoder()
+        const stream = new ReadableStream({
+          start(controller) {
+            // Send confidence info
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              retrievalConfidence: {
+                confidence: retrievalResult!.confidence,
+                sourceCount: retrievalResult!.sources.length,
+                action: 'low_confidence'
+              }
+            })}\n\n`))
+
+            // Send response as streaming tokens
+            const words = confidenceGate.suggestedResponse!.split(' ')
+            for (const word of words) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+                choices: [{ delta: { content: word + ' ' } }]
+              })}\n\n`))
+            }
+
+            // Send message IDs
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+              messageIds: {
+                userMessageId: userMessage.id,
+                assistantMessageId: assistantMessage.id,
+              }
+            })}\n\n`))
+
+            controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+            controller.close()
+          }
+        })
+
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+          },
+        })
+      }
+    }
 
     // Build context from tree-based retrieval sources
     let contextText = ''
@@ -415,21 +719,24 @@ YOUR CAPABILITIES:
 - Respond to greetings and clarifying questions naturally
 
 CITATION GUIDELINES (CRITICAL - FOLLOW EXACTLY):
-When referencing information from the provided documents, use inline numbered citations [1], [2], etc.
-- Place the citation immediately after the fact or claim it supports
-- Example: "The corporate tax rate is 9% for income above AED 375,000 [2]."
-- Multiple sources for one claim: "Small businesses may qualify for relief [1][3]."
+When referencing information from the provided documents, use INLINE numbered citations [1], [2], etc.
 
-CITATION QUALITY RULES (IMPORTANT):
-1. ONLY cite sources whose content you ACTUALLY USE in your response
-   - Do NOT cite a source just because it exists or seems related
-   - If you don't use information from source [5], don't cite [5]
-2. MATCH citations to specific content:
-   - If you state "9%" or "AED 375,000", cite the source containing that exact figure
-   - If you mention "Article 23", cite the source with Article 23 text
-3. For factual claims, cite at least one source that contains the supporting information
-4. When multiple sources support the same claim, cite all relevant ones: [1][3]
-5. Cite sources in order of relevance to each specific claim
+⚠️ IMPORTANT: Citations MUST appear INLINE after EACH fact, NOT grouped at the end of paragraphs.
+
+CORRECT (inline citations):
+"The corporate tax rate is 9% for income above AED 375,000 [1]. Small businesses with revenue below the threshold may qualify for relief [2]. Transfer pricing rules require arm's length pricing [3]."
+
+WRONG (grouped at end):
+"The corporate tax rate is 9% for income above AED 375,000. Small businesses may qualify for relief. Transfer pricing rules require arm's length pricing. [1][2][3]"
+
+CITATION RULES:
+1. Place citation IMMEDIATELY after each fact or claim (same sentence)
+2. NEVER save citations for the end of a paragraph
+3. ONLY cite sources whose content you ACTUALLY USE
+4. MATCH citations to specific content:
+   - If you state "9%", cite the source containing that figure
+   - If you mention "Article 50", cite the source with Article 50 text
+5. Multiple sources for one claim: "Relief may be available [1][2]."
 
 RESPONSE GUIDELINES:
 1. For greetings (hello, hi, etc.): Respond naturally and briefly mention you can help with UAE tax questions.
@@ -554,6 +861,29 @@ Use the source numbers [1], [2], etc. when citing specific information:` : 'NOTE
         let buffer = '' // Buffer for incomplete chunks
 
         try {
+          // === PAGEINDEX-STYLE THINKING EVENT ===
+          // Send thinking/reasoning data FIRST (before sources)
+          // This allows the frontend to show "Thought for X seconds" with reasoning
+          if (retrievalResult) {
+            const thinkingData = {
+              thinking: {
+                reasoning: retrievalResult.reasoning || '',
+                confidence: retrievalResult.confidence || 'medium',
+                nodeList: retrievalResult.node_ids || [],
+                retrievedSections: retrievalSources.slice(0, 10).map(s => ({
+                  nodeId: s.node_id,
+                  title: s.title,
+                  sectionPath: s.section_path,
+                  pageStart: s.pages.start,
+                  pageEnd: s.pages.end,
+                })),
+                totalTimeMs: metrics.ragTotalTimeMs || 0,
+                treeCount: documentTreeCount,
+              }
+            }
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(thinkingData)}\n\n`))
+          }
+
           // Send sources metadata at the start of the stream
           if (sourcesList.length > 0) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ sources: sourcesList })}\n\n`))
@@ -712,11 +1042,32 @@ Use the source numbers [1], [2], etc. when citing specific information:` : 'NOTE
 
               console.log(`📋 Citation filtering: ${sourcesList.length} sources → ${finalSources.length} cited`)
 
+              // Determine grounding status for UX transparency
+              // isGrounded = true means answer is based on documents
+              // isGrounded = false means answer is based on LLM general knowledge
+              const isGrounded = finalSources.length > 0
+
               // Send filtered sources AND renumbered content to frontend
               controller.enqueue(encoder.encode(`data: ${JSON.stringify({
                 filteredSources: finalSources,
                 filteredContent: finalResponse,
-                sourcesFiltered: true
+                sourcesFiltered: true,
+                groundingStatus: {
+                  isGrounded,
+                  sourcesCount: finalSources.length,
+                  message: isGrounded
+                    ? `Grounded in ${finalSources.length} document section${finalSources.length > 1 ? 's' : ''}`
+                    : 'Based on general knowledge (not from your documents)'
+                }
+              })}\n\n`))
+            } else {
+              // No sources retrieved at all - answer is from LLM knowledge
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({
+                groundingStatus: {
+                  isGrounded: false,
+                  sourcesCount: 0,
+                  message: 'Based on general knowledge (not from your documents)'
+                }
               })}\n\n`))
             }
 

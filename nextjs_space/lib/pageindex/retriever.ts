@@ -14,6 +14,7 @@ import {
   SimplifiedTreeNode,
 } from './types';
 import { TREE_RETRIEVAL_PROMPT } from './prompts';
+import { rerankSources, isRerankingAvailable, keywordRerank, type RerankedSource } from './reranker';
 
 // Lazy OpenAI client initialization
 let _openai: OpenAI | null = null;
@@ -58,19 +59,22 @@ function extractJSON(content: string): any {
 
 /**
  * Create simplified tree structure for LLM (reduces token usage)
+ * Uses minimal format: just node_id, title, and pages - no summaries
+ * This allows sending the full tree structure within token limits
  */
 function getSimplifiedTree(nodes: TreeNode[], depth: number = 0): SimplifiedTreeNode[] {
   const result: SimplifiedTreeNode[] = [];
 
   for (const node of nodes) {
+    // Minimal structure - title and pages are enough for LLM to reason about relevance
     const simplified: SimplifiedTreeNode = {
       node_id: node.node_id || '',
       title: node.title,
       pages: `${node.start_index}-${node.end_index}`,
-      summary: node.summary ? node.summary.substring(0, 250) + '...' : '',
     };
 
-    if (node.nodes && node.nodes.length > 0) {
+    // Only include children titles for top-level nodes to show structure
+    if (depth === 0 && node.nodes && node.nodes.length > 0) {
       simplified.children = node.nodes.map((n) => n.title);
     }
 
@@ -137,9 +141,17 @@ export async function retrieveFromTree(
   // Step 1: Create simplified tree for LLM
   const simplifiedTree = getSimplifiedTree(tree.structure);
 
-  // Limit tree size to avoid token limits
+  // Convert to JSON - with minimal structure, 91 nodes should be ~10-15k chars
   const treeJson = JSON.stringify(simplifiedTree, null, 2);
-  const truncatedTree = treeJson.substring(0, 15000);
+
+  // Debug: Log tree size and check for Article 50
+  console.log(`  - Simplified tree size: ${treeJson.length} chars, ${simplifiedTree.length} nodes`);
+  const hasArticle50 = treeJson.includes('Article 50');
+  console.log(`  - Contains 'Article 50': ${hasArticle50}`);
+
+  // Increase limit to 100k to accommodate large legal documents
+  // With minimal structure (no summaries), this allows ~500+ nodes
+  const truncatedTree = treeJson.substring(0, 100000);
 
   // Step 2: Call LLM to reason about relevant sections
   const prompt = TREE_RETRIEVAL_PROMPT(truncatedTree, query);
@@ -150,13 +162,18 @@ export async function retrieveFromTree(
     temperature: 0,
   });
 
-  const result = extractJSON(response.choices[0].message.content || '');
+  const rawResponse = response.choices[0].message.content || '';
+  const result = extractJSON(rawResponse);
+
+  // Debug: Log first 300 chars of raw response
+  console.log(`  - LLM raw response: ${rawResponse.substring(0, 300)}...`);
 
   const nodeIds: string[] = result.relevant_nodes || [];
   const reasoning: string = result.thinking || '';
   const confidence: 'high' | 'medium' | 'low' = result.confidence || 'medium';
 
   console.log(`  - Found ${nodeIds.length} relevant sections`);
+  console.log(`  - Node IDs: ${nodeIds.slice(0, 5).join(', ')}${nodeIds.length > 5 ? '...' : ''}`);
   console.log(`  - Confidence: ${confidence}`);
 
   // Step 3: Extract content and build sources
@@ -195,6 +212,11 @@ export async function retrieveFromTree(
     confidence,
     content: contentParts.join('\n\n---\n\n'),
     sources,
+    usage: response.usage ? {
+      prompt_tokens: response.usage.prompt_tokens,
+      completion_tokens: response.usage.completion_tokens,
+      total_tokens: response.usage.total_tokens,
+    } : undefined,
   };
 }
 
@@ -308,6 +330,10 @@ export function renumberCitations(
 
 /**
  * Get retrieval for multiple documents (for multi-document queries)
+ * Includes optional cross-encoder reranking for improved precision
+ *
+ * RERANKING IS DISABLED BY DEFAULT for Supabase compatibility.
+ * Set enableReranking=true and configure JINA_API_KEY or COHERE_API_KEY to enable.
  */
 export async function retrieveFromMultipleTrees(
   trees: Array<{ tree: DocumentTree; documentId: string }>,
@@ -315,12 +341,22 @@ export async function retrieveFromMultipleTrees(
   options?: {
     model?: string;
     maxSourcesPerDoc?: number;
+    enableReranking?: boolean;  // Enable reranking (default: FALSE - disabled)
+    maxFinalSources?: number;   // Max sources (default: 5)
+    minRerankScore?: number;    // Minimum rerank score (default: 0.3)
   }
 ): Promise<{
   results: Array<{ documentId: string; result: RetrievalResult }>;
   combinedContent: string;
   allSources: RetrievalSource[];
+  reranked?: boolean;
 }> {
+  const {
+    enableReranking = false,  // DISABLED by default for Supabase compatibility
+    maxFinalSources = 5,
+    minRerankScore = 0.3,
+  } = options || {};
+
   const results = await Promise.all(
     trees.map(async ({ tree, documentId }) => ({
       documentId,
@@ -332,7 +368,7 @@ export async function retrieveFromMultipleTrees(
   );
 
   // Combine content and sources
-  const allSources: RetrievalSource[] = [];
+  let allSources: RetrievalSource[] = [];
   const contentParts: string[] = [];
 
   for (const { result } of results) {
@@ -342,9 +378,40 @@ export async function retrieveFromMultipleTrees(
     }
   }
 
+  // Limit sources if we have too many (simple truncation when reranking disabled)
+  if (allSources.length > maxFinalSources && !enableReranking) {
+    allSources = allSources.slice(0, maxFinalSources);
+  }
+
+  // Apply reranking only if explicitly enabled
+  let reranked = false;
+  if (enableReranking && allSources.length > maxFinalSources && isRerankingAvailable()) {
+    try {
+      console.log(`\n🔄 Reranking ${allSources.length} sources...`);
+
+      const rerankedSources = await rerankSources(query, allSources, {
+        topK: maxFinalSources,
+        minScore: minRerankScore,
+      });
+
+      console.log(`   Original: ${allSources.length} sources`);
+      console.log(`   After reranking: ${rerankedSources.length} sources`);
+      if (rerankedSources.length > 0) {
+        console.log(`   Top score: ${rerankedSources[0].rerankedScore.toFixed(3)}`);
+      }
+
+      allSources = rerankedSources;
+      reranked = true;
+    } catch (error) {
+      console.error('   Reranking failed, using original order:', error);
+      allSources = allSources.slice(0, maxFinalSources);
+    }
+  }
+
   return {
     results,
     combinedContent: contentParts.join('\n\n===\n\n'),
     allSources,
+    reranked,
   };
 }

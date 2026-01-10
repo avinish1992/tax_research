@@ -1,1 +1,81 @@
-# Deploy trigger: 2025-12-28T02:34:42+05:30
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Testing
+coverage/
+
+# Next.js
+.next/
+out/
+
+# Production
+build/
+dist/
+
+# Misc
+.DS_Store
+*.pem
+
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local env files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+
+# Vercel
+.vercel
+
+# Netlify
+.netlify/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+.playwright-mcp/
+
+# Accuracy testing output (generated reports)
+tests/accuracy-reports/
+tests/accuracy-results/
+
+# Test result files (generated)
+*-test-*.json
+*-results.json
+test-results.json
+
+# Large test documents
+documents/
+test-docs/
+
+# Upload logs
+upload_test_log.md
+
+# Deno
+deno.lock
+
+# Temporary files
+*.tmp
+*.temp

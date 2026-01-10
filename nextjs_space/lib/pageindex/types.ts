@@ -143,6 +143,13 @@ export interface RetrievalResult {
 
   /** Detailed source information for citations */
   sources: RetrievalSource[];
+
+  /** Token usage from retrieval LLM call (for cost tracking) */
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+  };
 }
 
 /**
@@ -178,7 +185,7 @@ export interface SimplifiedTreeNode {
   node_id: string;
   title: string;
   pages: string;
-  summary: string;
+  summary?: string;  // Optional - minimal format doesn't include summaries
   children?: string[];
 }
 

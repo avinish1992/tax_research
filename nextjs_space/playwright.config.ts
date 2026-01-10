@@ -1,24 +1,25 @@
 import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
-  testDir: './tests/e2e',
+  testDir: './tests',
   fullyParallel: false, // Run tests sequentially for RAG evaluation
   forbidOnly: !!process.env.CI,
   retries: 0,
   workers: 1,
   reporter: [
+    ['list'],
     ['html', { outputFolder: 'playwright-report' }],
-    ['json', { outputFile: 'tests/rag_evaluation/reports/playwright-results.json' }]
+    ['json', { outputFile: 'tests/accuracy-results/playwright-results.json' }]
   ],
   use: {
-    baseURL: 'http://localhost:3000',
+    baseURL: 'http://localhost:5000',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
   },
-  timeout: 180000, // 3 minutes per test
+  timeout: 600000, // 10 minutes for comprehensive test
   expect: {
-    timeout: 30000, // 30 seconds for expects
+    timeout: 60000, // 60 seconds for expects
   },
   projects: [
     {
@@ -27,8 +28,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: 'npm run dev',
-    url: 'http://localhost:3000',
+    command: 'npm run dev -- -p 5000',
+    url: 'http://localhost:5000',
     reuseExistingServer: true,
     timeout: 120000,
   },

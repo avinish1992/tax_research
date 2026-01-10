@@ -51,6 +51,7 @@
     "autoprefixer": "10.4.15",
     "class-variance-authority": "0.7.0",
     "clsx": "2.1.1",
+    "cohere-ai": "^7.20.0",
     "cookie": "1.0.2",
     "date-fns": "3.6.0",
     "dotenv": "16.5.0",

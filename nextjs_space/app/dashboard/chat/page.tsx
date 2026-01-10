@@ -5,9 +5,12 @@ import { useSearchParams, useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { Streamdown } from 'streamdown'
 import { useSidebar } from '@/components/sidebar-context'
-import { FeedbackButtons } from '@/components/feedback-buttons'
+import { ResponseActions } from '@/components/response-actions'
 import { ClientOnly } from '@/components/ClientOnly'
 import { HighlightedText } from '@/lib/text-highlight'
+import { ThinkingStepsDisplay, ThinkingIndicator, type ThinkingState } from '@/components/chat/thinking-steps-display'
+import { GroundingIndicator, type GroundingStatus } from '@/components/chat/grounding-indicator'
+import { UploadModal } from '@/components/upload-modal'
 import dynamic from 'next/dynamic'
 
 // Dynamically import PDFViewer to avoid SSR issues with canvas
@@ -39,6 +42,23 @@ interface Message {
   createdAt: string
   sources?: Source[]
   metadata?: Record<string, any>
+  // PageIndex-style thinking/reasoning data
+  thinking?: {
+    reasoning: string
+    confidence: 'high' | 'medium' | 'low'
+    nodeList: string[]
+    retrievedSections: Array<{
+      nodeId: string
+      title: string
+      sectionPath: string
+      pageStart: number
+      pageEnd: number
+    }>
+    totalTimeMs: number
+    treeCount: number
+  }
+  // Grounding status - shows if answer is from documents or LLM knowledge
+  groundingStatus?: GroundingStatus
 }
 
 interface Source {
@@ -83,6 +103,29 @@ const CitationPopover = ({
   const tooltipPreview = source?.content?.substring(0, 50) + (source?.content && source.content.length > 50 ? '...' : '')
   // Full preview for click popover (150 chars)
   const fullPreview = source?.content?.substring(0, 150) + (source?.content && source.content.length > 150 ? '...' : '')
+
+  // Create truncated filename for pill display (e.g., "Federal...022-EN.pdf")
+  const getTruncatedFilename = (fileName: string) => {
+    if (!fileName) return ''
+    if (fileName.length <= 20) return fileName
+    const ext = fileName.includes('.') ? '.' + fileName.split('.').pop() : ''
+    const nameWithoutExt = fileName.replace(ext, '')
+    const truncated = nameWithoutExt.substring(0, 8) + '...' + nameWithoutExt.slice(-6) + ext
+    return truncated
+  }
+
+  // Get page display text
+  const getPageText = () => {
+    if (source?.pageRange) {
+      return source.pageRange.start === source.pageRange.end
+        ? `p.${source.pageRange.start}`
+        : `p.${source.pageRange.start}-${source.pageRange.end}`
+    }
+    if (source?.pageNumber) return `p.${source.pageNumber}`
+    return ''
+  }
+
+  const pillText = source ? `${getTruncatedFilename(source.fileName)} ${getPageText()}`.trim() : `[${sourceIndex}]`
 
   // Close popover when clicking outside
   useEffect(() => {
@@ -140,13 +183,13 @@ const CitationPopover = ({
         type="button"
         disabled={!source}
         onClick={handleClick}
-        className={`inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 text-[11px] font-medium rounded-md align-super -ml-0.5 mr-0.5 border transition-colors ${
+        className={`inline-flex items-center justify-center h-[20px] px-2 text-[11px] font-medium rounded-full align-baseline mx-0.5 border transition-colors whitespace-nowrap ${
           source
-            ? 'bg-primary/10 text-primary hover:bg-primary/20 border-primary/20 hover:border-primary/40 cursor-pointer'
+            ? 'bg-secondary text-secondary-foreground hover:bg-secondary/80 border-border hover:border-border/80 cursor-pointer'
             : 'bg-muted text-muted-foreground border-border cursor-default'
-        } ${isOpen ? 'bg-primary/20 border-primary/40' : ''}`}
+        } ${isOpen ? 'bg-secondary/80 border-border/80' : ''}`}
       >
-        {sourceIndex}
+        {pillText}
       </button>
 
       {/* Hover tooltip - lightweight preview */}
@@ -368,6 +411,7 @@ function ChatContent() {
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([])
   const [isLoadingDocs, setIsLoadingDocs] = useState(true)
   const [showAddMenu, setShowAddMenu] = useState(false)
+  const [showUploadModal, setShowUploadModal] = useState(false)
   const [showSourcesPanel, setShowSourcesPanel] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [previewDoc, setPreviewDoc] = useState<Document | null>(null)
@@ -383,6 +427,7 @@ function ChatContent() {
   const [selectedResultIdx, setSelectedResultIdx] = useState(0)
   const [usePdfViewer, setUsePdfViewer] = useState(false) // Use react-pdf instead of iframe
   const [highlightText, setHighlightText] = useState<string | undefined>(undefined)
+  const [regeneratingMessageId, setRegeneratingMessageId] = useState<string | null>(null)
   const searchPillsRef = useRef<HTMLDivElement>(null)
 
   // Track if we're currently sending a message (to prevent reload from clearing state)
@@ -632,6 +677,16 @@ function ChatContent() {
               if (parsed.error) {
                 throw new Error(parsed.error)
               }
+              // Handle PageIndex-style thinking data (comes BEFORE sources)
+              if (parsed.thinking) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, thinking: parsed.thinking }
+                      : msg
+                  )
+                )
+              }
               if (parsed.sources) {
                 sources = parsed.sources
                 // IMMEDIATELY attach sources to message state (don't wait for content)
@@ -670,7 +725,22 @@ function ChatContent() {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === tempAssistantMsgId
-                      ? { ...msg, sources: parsed.filteredSources, content: parsed.filteredContent || msg.content }
+                      ? {
+                          ...msg,
+                          sources: parsed.filteredSources,
+                          content: parsed.filteredContent || msg.content,
+                          groundingStatus: parsed.groundingStatus
+                        }
+                      : msg
+                  )
+                )
+              }
+              // Handle standalone grounding status (when no sources at all)
+              if (parsed.groundingStatus && !parsed.filteredSources) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, groundingStatus: parsed.groundingStatus }
                       : msg
                   )
                 )
@@ -705,6 +775,16 @@ function ChatContent() {
           if (data && data !== '[DONE]') {
             try {
               const parsed = JSON.parse(data)
+              // Handle PageIndex-style thinking data (buffer processing)
+              if (parsed.thinking) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, thinking: parsed.thinking }
+                      : msg
+                  )
+                )
+              }
               if (parsed.sources) {
                 sources = parsed.sources
                 setMessages((prev) =>
@@ -738,7 +818,22 @@ function ChatContent() {
                 setMessages((prev) =>
                   prev.map((msg) =>
                     msg.id === tempAssistantMsgId
-                      ? { ...msg, sources: parsed.filteredSources, content: parsed.filteredContent || msg.content }
+                      ? {
+                          ...msg,
+                          sources: parsed.filteredSources,
+                          content: parsed.filteredContent || msg.content,
+                          groundingStatus: parsed.groundingStatus
+                        }
+                      : msg
+                  )
+                )
+              }
+              // Handle standalone grounding status (buffer processing, when no sources at all)
+              if (parsed.groundingStatus && !parsed.filteredSources) {
+                setMessages((prev) =>
+                  prev.map((msg) =>
+                    msg.id === tempAssistantMsgId
+                      ? { ...msg, groundingStatus: parsed.groundingStatus }
                       : msg
                   )
                 )
@@ -794,6 +889,168 @@ function ChatContent() {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       sendMessage()
+    }
+  }
+
+  // Regenerate a response for a given assistant message
+  const regenerateResponse = async (assistantMessageId: string) => {
+    if (isLoading || regeneratingMessageId) return
+
+    // Find the user message that preceded this assistant message
+    const msgIndex = messages.findIndex(m => m.id === assistantMessageId)
+    if (msgIndex === -1) return
+
+    const prevUserMsg = messages.slice(0, msgIndex).reverse().find(m => m.role === 'user')
+    if (!prevUserMsg) return
+
+    const query = prevUserMsg.content
+
+    // Set regenerating state
+    setRegeneratingMessageId(assistantMessageId)
+    setIsLoading(true)
+    isSendingRef.current = true
+
+    // Clear the assistant message content (keep thinking/sources for now)
+    setMessages((prev) =>
+      prev.map((msg) =>
+        msg.id === assistantMessageId
+          ? { ...msg, content: '', sources: undefined, thinking: undefined }
+          : msg
+      )
+    )
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          chatSessionId: sessionId,
+          message: query,
+          model,
+          documentIds: selectedDocIds,
+          regenerate: true, // Signal this is a regeneration
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.error || `Request failed with status ${response.status}`)
+      }
+
+      if (!response.body) throw new Error('No response body received')
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let assistantResponse = ''
+      let sources: Source[] = []
+      let sseBuffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        sseBuffer += decoder.decode(value, { stream: true })
+        const lines = sseBuffer.split('\n')
+        sseBuffer = lines.pop() || ''
+
+        for (const line of lines) {
+          const trimmedLine = line.trim()
+          if (!trimmedLine || !trimmedLine.startsWith('data: ')) continue
+
+          const data = trimmedLine.slice(6).trim()
+          if (data === '[DONE]' || !data) continue
+
+          try {
+            const parsed = JSON.parse(data)
+            if (parsed.error) throw new Error(parsed.error)
+
+            // Handle thinking data
+            if (parsed.thinking) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId ? { ...msg, thinking: parsed.thinking } : msg
+                )
+              )
+            }
+
+            // Handle sources
+            if (parsed.sources) {
+              sources = parsed.sources
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId ? { ...msg, sources } : msg
+                )
+              )
+            }
+
+            // Handle filtered sources
+            if (parsed.filteredSources && parsed.sourcesFiltered) {
+              sources = parsed.filteredSources
+              if (parsed.filteredContent) assistantResponse = parsed.filteredContent
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId
+                    ? {
+                        ...msg,
+                        sources: parsed.filteredSources,
+                        content: parsed.filteredContent || msg.content,
+                        groundingStatus: parsed.groundingStatus
+                      }
+                    : msg
+                )
+              )
+            }
+            // Handle standalone grounding status (regeneration, when no sources)
+            if (parsed.groundingStatus && !parsed.filteredSources) {
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId
+                    ? { ...msg, groundingStatus: parsed.groundingStatus }
+                    : msg
+                )
+              )
+            }
+
+            // Handle content streaming
+            const content = parsed?.choices?.[0]?.delta?.content
+            if (content) {
+              assistantResponse += content
+              setMessages((prev) =>
+                prev.map((msg) =>
+                  msg.id === assistantMessageId ? { ...msg, content: assistantResponse } : msg
+                )
+              )
+            }
+          } catch (e) {
+            console.error('SSE parse error during regeneration:', e)
+          }
+        }
+      }
+
+      // Final update with complete response
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: assistantResponse, sources }
+            : msg
+        )
+      )
+    } catch (error) {
+      console.error('Regeneration error:', error)
+      const errorMessage = error instanceof Error ? error.message : 'An unexpected error occurred'
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId
+            ? { ...msg, content: `Sorry, an error occurred while regenerating: ${errorMessage}` }
+            : msg
+        )
+      )
+    } finally {
+      setIsLoading(false)
+      setRegeneratingMessageId(null)
+      setTimeout(() => {
+        isSendingRef.current = false
+      }, 500)
     }
   }
 
@@ -884,6 +1141,68 @@ function ChatContent() {
 
     await loadDocuments()
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  // Handle files from the upload modal
+  const handleFilesFromModal = async (files: File[]) => {
+    setShowUploadModal(false)
+
+    for (const file of files) {
+      // Add to uploading state
+      setUploadingFiles(prev => [...prev, { name: file.name, progress: 'uploading' }])
+
+      // Show uploading toast
+      const toastId = toast.loading(`Uploading ${file.name}...`)
+
+      const formData = new FormData()
+      formData.append('file', file)
+
+      try {
+        // Update to processing state
+        setUploadingFiles(prev =>
+          prev.map(f => f.name === file.name ? { ...f, progress: 'processing' } : f)
+        )
+        toast.loading(`Processing ${file.name}...`, { id: toastId })
+
+        const response = await fetch('/api/docs-api/upload', {
+          method: 'POST',
+          body: formData,
+        })
+
+        const data = await response.json()
+
+        if (!response.ok) {
+          throw new Error(data.error || 'Upload failed')
+        }
+
+        // Success
+        setUploadingFiles(prev =>
+          prev.map(f => f.name === file.name ? { ...f, progress: 'complete' } : f)
+        )
+        toast.success(`${file.name} uploaded successfully`, { id: toastId })
+
+        // Remove from uploading list after a short delay
+        setTimeout(() => {
+          setUploadingFiles(prev => prev.filter(f => f.name !== file.name))
+        }, 2000)
+
+      } catch (error) {
+        console.error('Upload error:', error)
+        const errorMsg = error instanceof Error ? error.message : 'Upload failed'
+
+        setUploadingFiles(prev =>
+          prev.map(f => f.name === file.name ? { ...f, progress: 'error', error: errorMsg } : f)
+        )
+        toast.error(`${file.name}: ${errorMsg}`, { id: toastId })
+
+        // Remove from uploading list after showing error
+        setTimeout(() => {
+          setUploadingFiles(prev => prev.filter(f => f.name !== file.name))
+        }, 3000)
+      }
+    }
+
+    await loadDocuments()
   }
 
   // Handle citation click - open sources panel and preview the source with fresh URL
@@ -1134,6 +1453,30 @@ function ChatContent() {
                     </div>
                   ) : (
                     <div className="space-y-2">
+                      {/* PageIndex-style Thinking Display - Simple "Thought for X seconds" */}
+                      {msg.thinking && (
+                        <div className="mb-2">
+                          <ThinkingStepsDisplay
+                            thinking={{
+                              isThinking: isStreamingMessage && !displayContent,
+                              totalThinkingTimeMs: msg.thinking.totalTimeMs,
+                              reasoning: msg.thinking.reasoning,
+                              confidence: msg.thinking.confidence,
+                            }}
+                            defaultExpanded={false}
+                          />
+                        </div>
+                      )}
+                      {/* Show thinking indicator during streaming when waiting for response */}
+                      {isStreamingMessage && !displayContent && !msg.thinking && (
+                        <ThinkingIndicator text="Analyzing documents..." />
+                      )}
+                      {/* Grounding Indicator - shows if answer is from docs or LLM knowledge */}
+                      {msg.groundingStatus && !isStreamingMessage && (
+                        <div className="mb-2">
+                          <GroundingIndicator status={msg.groundingStatus} />
+                        </div>
+                      )}
                       {displayContent ? (
                         <ClientOnly
                           fallback={
@@ -1196,13 +1539,12 @@ function ChatContent() {
                           />
                         </div>
                       )}
-                      {/* Feedback Buttons */}
+                      {/* Response Actions: Copy, Thumbs Down, Regenerate */}
                       {displayContent && sessionId && (
-                        <FeedbackButtons
+                        <ResponseActions
                           conversationId={sessionId}
                           messageId={msg.id}
                           query={(() => {
-                            // Find the user message that preceded this assistant message
                             const msgIndex = messages.findIndex(m => m.id === msg.id)
                             const prevUserMsg = messages.slice(0, msgIndex).reverse().find(m => m.role === 'user')
                             return prevUserMsg?.content || ''
@@ -1213,6 +1555,8 @@ function ChatContent() {
                             pageNumber: s.pageNumber ?? null,
                             chunkIndex: s.index,
                           }))}
+                          onRegenerate={() => regenerateResponse(msg.id)}
+                          isRegenerating={regeneratingMessageId === msg.id}
                         />
                       )}
                     </div>
@@ -1263,20 +1607,18 @@ function ChatContent() {
                   {showAddMenu && (
                     <div className="absolute bottom-full left-0 mb-2 w-64 bg-card border border-border rounded-xl shadow-xl overflow-hidden z-50 animate-in fade-in slide-in-from-bottom-2">
                       <div className="py-1">
-                        <label className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors cursor-pointer">
+                        <button
+                          onClick={() => {
+                            setShowAddMenu(false)
+                            setShowUploadModal(true)
+                          }}
+                          className="w-full flex items-center gap-3 px-4 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors text-left"
+                        >
                           <svg className="w-4 h-4 text-muted-foreground" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                           </svg>
-                          Add files or photos
-                          <input
-                            ref={fileInputRef}
-                            type="file"
-                            accept=".pdf,.docx,.doc,.txt,.md,.html,.pptx,.xlsx"
-                            multiple
-                            onChange={handleFileUpload}
-                            className="hidden"
-                          />
-                        </label>
+                          Upload documents
+                        </button>
                         <button
                           onClick={() => {
                             setShowAddMenu(false)
@@ -1757,6 +2099,14 @@ function ChatContent() {
           )}
         </div>
       )}
+
+      {/* Upload Modal */}
+      <UploadModal
+        open={showUploadModal}
+        onOpenChange={setShowUploadModal}
+        onFilesSelected={handleFilesFromModal}
+        isUploading={uploadingFiles.length > 0}
+      />
     </div>
   )
 }

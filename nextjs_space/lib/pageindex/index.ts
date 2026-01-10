@@ -33,5 +33,47 @@ export {
   renumberCitations,
 } from './retriever';
 
+// Retrieval Confidence Gating (PageIndex-aligned approach)
+// Replaces deprecated keyword-based query-classifier.ts
+export {
+  quickOffTopicFilter,
+  shouldProceedWithResponse,
+  OFF_TOPIC_RESPONSES,
+  CONFIDENCE_THRESHOLDS,
+  type OffTopicCheckResult,
+} from './retrieval-confidence-gate';
+
+// Cross-Encoder Reranking
+export {
+  rerankSources,
+  keywordRerank,
+  isRerankingAvailable,
+  getAvailableProvider,
+  type RerankedSource,
+  type RerankOptions,
+} from './reranker';
+
+// Model Router for Task-Based Selection
+export {
+  getModelConfig,
+  selectTaskType,
+  getModelForQuery,
+  supportsReasoningMode,
+  getAvailableModels,
+  type TaskType,
+  type ModelConfig,
+} from './model-router';
+
+// Citation Validation
+export {
+  validateCitations,
+  checkKeyFigures,
+  getKeyFiguresPromptAddition,
+  getResponseQualityScore,
+  KEY_FIGURE_CHECKS,
+  type CitationValidationResult,
+  type KeyFigureCheckResult,
+} from './citation-validator';
+
 // Re-export prompts for customization
 export * from './prompts';

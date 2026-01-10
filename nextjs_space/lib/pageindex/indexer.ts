@@ -27,6 +27,7 @@ import {
   NODE_SUMMARY_PROMPT,
   DOC_DESCRIPTION_PROMPT,
   ADD_PAGE_NUMBER_PROMPT,
+  SINGLE_TOC_FIXER_PROMPT,
 } from './prompts';
 import {
   extractPagesFromPDF,
@@ -351,6 +352,242 @@ async function checkTitleStartsAtBeginning(
 }
 
 /**
+ * Verify all TOC items - check that each title appears on its specified page
+ * Returns accuracy score and list of incorrect items
+ * (Port of Python verify_toc function)
+ */
+async function verifyTOC(
+  pages: PageContent[],
+  tocItems: TOCItem[],
+  model: string,
+  sampleSize?: number
+): Promise<{ accuracy: number; incorrectItems: Array<{ listIndex: number; title: string; physicalIndex: number }> }> {
+  console.log('PageIndex: Verifying TOC accuracy...');
+
+  // Filter items with valid physical_index
+  const validItems = tocItems.filter(item =>
+    item.physical_index !== null &&
+    item.physical_index !== undefined
+  );
+
+  if (validItems.length === 0) {
+    return { accuracy: 0, incorrectItems: [] };
+  }
+
+  // Determine which items to check
+  const itemsToCheck = sampleSize && sampleSize < validItems.length
+    ? validItems.slice(0, sampleSize) // For now, just take first N (could randomize)
+    : validItems;
+
+  // Verify each item concurrently
+  const results = await Promise.all(
+    itemsToCheck.map(async (item, idx) => {
+      const listIndex = tocItems.indexOf(item);
+      const isCorrect = await verifyTitleOnPage(
+        item.title,
+        pages,
+        item.physical_index!,
+        model
+      );
+      return {
+        listIndex,
+        title: item.title,
+        physicalIndex: item.physical_index!,
+        isCorrect
+      };
+    })
+  );
+
+  const correctCount = results.filter(r => r.isCorrect).length;
+  const incorrectItems = results
+    .filter(r => !r.isCorrect)
+    .map(r => ({ listIndex: r.listIndex, title: r.title, physicalIndex: r.physicalIndex }));
+
+  const accuracy = correctCount / results.length;
+  console.log(`  - Accuracy: ${(accuracy * 100).toFixed(1)}% (${correctCount}/${results.length})`);
+  console.log(`  - Incorrect items: ${incorrectItems.length}`);
+
+  return { accuracy, incorrectItems };
+}
+
+/**
+ * Fix a single incorrect TOC item by searching between known correct pages
+ * (Port of Python single_toc_item_index_fixer)
+ */
+async function fixSingleTOCItem(
+  title: string,
+  pages: PageContent[],
+  prevCorrectIndex: number,
+  nextCorrectIndex: number,
+  startIndex: number,
+  model: string
+): Promise<number | null> {
+  // Build content from range between prev and next correct items
+  let content = '';
+  for (let i = prevCorrectIndex; i <= nextCorrectIndex; i++) {
+    const pageIdx = i - startIndex;
+    if (pageIdx >= 0 && pageIdx < pages.length) {
+      content += `<physical_index_${i}>\n${pages[pageIdx].text}\n<physical_index_${i}>\n\n`;
+    }
+  }
+
+  const response = await callLLM(SINGLE_TOC_FIXER_PROMPT(title, content), model);
+  const result = extractJSON(response);
+
+  if (result.physical_index) {
+    return parsePhysicalIndex(result.physical_index);
+  }
+  return null;
+}
+
+/**
+ * Fix incorrect TOC items with retries
+ * (Port of Python fix_incorrect_toc_with_retries)
+ */
+async function fixIncorrectTOC(
+  tocItems: TOCItem[],
+  pages: PageContent[],
+  incorrectItems: Array<{ listIndex: number; title: string; physicalIndex: number }>,
+  startIndex: number,
+  model: string,
+  maxAttempts: number = 3
+): Promise<{ tocItems: TOCItem[]; remainingIncorrect: typeof incorrectItems }> {
+  console.log(`PageIndex: Fixing ${incorrectItems.length} incorrect TOC items...`);
+
+  let currentIncorrect = [...incorrectItems];
+  const incorrectIndices = new Set(incorrectItems.map(i => i.listIndex));
+  const endIndex = pages.length + startIndex - 1;
+
+  for (let attempt = 0; attempt < maxAttempts && currentIncorrect.length > 0; attempt++) {
+    console.log(`  - Attempt ${attempt + 1}: ${currentIncorrect.length} items to fix`);
+
+    const fixResults = await Promise.all(
+      currentIncorrect.map(async (item) => {
+        // Find previous correct item
+        let prevCorrect = startIndex;
+        for (let i = item.listIndex - 1; i >= 0; i--) {
+          if (!incorrectIndices.has(i) && tocItems[i].physical_index) {
+            prevCorrect = tocItems[i].physical_index!;
+            break;
+          }
+        }
+
+        // Find next correct item
+        let nextCorrect = endIndex;
+        for (let i = item.listIndex + 1; i < tocItems.length; i++) {
+          if (!incorrectIndices.has(i) && tocItems[i].physical_index) {
+            nextCorrect = tocItems[i].physical_index!;
+            break;
+          }
+        }
+
+        const fixedIndex = await fixSingleTOCItem(
+          item.title,
+          pages,
+          prevCorrect,
+          nextCorrect,
+          startIndex,
+          model
+        );
+
+        if (fixedIndex !== null) {
+          // Verify the fixed index
+          const isCorrect = await verifyTitleOnPage(item.title, pages, fixedIndex, model);
+          return { ...item, fixedIndex, isCorrect };
+        }
+        return { ...item, fixedIndex: null, isCorrect: false };
+      })
+    );
+
+    // Update TOC items with fixed indices
+    const stillIncorrect: typeof incorrectItems = [];
+    for (const result of fixResults) {
+      if (result.isCorrect && result.fixedIndex !== null) {
+        tocItems[result.listIndex].physical_index = result.fixedIndex;
+        incorrectIndices.delete(result.listIndex);
+      } else {
+        stillIncorrect.push({
+          listIndex: result.listIndex,
+          title: result.title,
+          physicalIndex: result.fixedIndex || result.physicalIndex
+        });
+      }
+    }
+
+    currentIncorrect = stillIncorrect;
+  }
+
+  return { tocItems, remainingIncorrect: currentIncorrect };
+}
+
+/**
+ * Process large nodes recursively to extract sub-structure
+ * (Port of Python process_large_node_recursively)
+ */
+async function processLargeNodeRecursively(
+  node: TreeNode,
+  pages: PageContent[],
+  options: Required<IndexingOptions>
+): Promise<TreeNode> {
+  const nodePages = pages.slice(node.start_index - 1, node.end_index);
+  const tokenCount = nodePages.reduce((sum, p) => sum + p.token_count, 0);
+  const pageCount = node.end_index - node.start_index;
+
+  // Check if node is large enough to need sub-structure
+  if (pageCount > options.max_page_num_each_node && tokenCount >= options.max_token_num_each_node) {
+    console.log(`PageIndex: Processing large node "${node.title}" (${pageCount} pages, ${tokenCount} tokens)`);
+
+    // Generate sub-structure from content
+    const subTocItems = await generateTOCFromContent(nodePages, node.start_index, options);
+
+    if (subTocItems.length > 0) {
+      // Check which items start at page beginning
+      for (const item of subTocItems) {
+        if (item.physical_index) {
+          const pageIdx = item.physical_index - 1;
+          if (pageIdx >= 0 && pageIdx < pages.length) {
+            const startsAtBeginning = await checkTitleStartsAtBeginning(
+              item.title,
+              pages[pageIdx].text,
+              options.model
+            );
+            (item as any).appear_start = startsAtBeginning ? 'yes' : 'no';
+          }
+        }
+      }
+
+      // Filter valid items
+      const validItems = subTocItems.filter(item =>
+        item.physical_index !== null &&
+        item.physical_index !== undefined
+      );
+
+      if (validItems.length > 0) {
+        // Check if first sub-item is same as parent node
+        if (validItems[0].title.trim() === node.title.trim()) {
+          node.nodes = listToTree(validItems.slice(1), node.end_index);
+          if (validItems.length > 1) {
+            node.end_index = validItems[1].physical_index!;
+          }
+        } else {
+          node.nodes = listToTree(validItems, node.end_index);
+          node.end_index = validItems[0].physical_index!;
+        }
+      }
+    }
+  }
+
+  // Recursively process child nodes
+  if (node.nodes && node.nodes.length > 0) {
+    await Promise.all(
+      node.nodes.map(child => processLargeNodeRecursively(child, pages, options))
+    );
+  }
+
+  return node;
+}
+
+/**
  * Convert flat TOC list to hierarchical tree structure
  */
 function listToTree(items: TOCItem[], endPageIndex: number): TreeNode[] {
@@ -573,10 +810,39 @@ export async function indexDocument(
       item.physical_index <= totalPages
   );
 
-  // Step 5: Add preface if needed
+  // Step 5: Verify TOC accuracy (Python: verify_toc)
+  if (tocItems.length > 0) {
+    const { accuracy, incorrectItems } = await verifyTOC(pages, tocItems, options.model);
+
+    // Step 5b: Fix incorrect items if accuracy is reasonable but not perfect
+    if (accuracy < 1.0 && accuracy >= 0.6 && incorrectItems.length > 0) {
+      const { tocItems: fixedItems } = await fixIncorrectTOC(
+        tocItems,
+        pages,
+        incorrectItems,
+        1, // startIndex
+        options.model,
+        3  // maxAttempts
+      );
+      tocItems = fixedItems;
+    } else if (accuracy < 0.6 && tocPages.length > 0) {
+      // If accuracy is too low and we had a TOC, try generating from content instead
+      console.log('PageIndex: TOC accuracy too low, regenerating from content...');
+      tocItems = await generateTOCFromContent(pages, 1, options);
+      tocItems = tocItems.filter(
+        (item) =>
+          item.physical_index !== null &&
+          item.physical_index !== undefined &&
+          item.physical_index >= 1 &&
+          item.physical_index <= totalPages
+      );
+    }
+  }
+
+  // Step 6: Add preface if needed
   tocItems = addPrefaceIfNeeded(tocItems);
 
-  // Step 6: Check which items start at page beginning
+  // Step 7: Check which items start at page beginning
   console.log('PageIndex: Checking title positions...');
   for (const item of tocItems) {
     if (item.physical_index) {
@@ -592,38 +858,44 @@ export async function indexDocument(
     }
   }
 
-  // Step 7: Convert to tree structure
-  const structure = listToTree(tocItems, totalPages);
+  // Step 8: Convert to tree structure
+  let structure = listToTree(tocItems, totalPages);
 
-  // Step 8: Add node IDs
+  // Step 9: Process large nodes recursively (Python: process_large_node_recursively)
+  console.log('PageIndex: Processing large nodes for sub-structure...');
+  await Promise.all(
+    structure.map(node => processLargeNodeRecursively(node, pages, options))
+  );
+
+  // Step 10: Add node IDs
   if (options.add_node_id) {
     writeNodeIds(structure);
   }
 
-  // Step 9: Add node text
+  // Step 11: Add node text
   if (options.add_node_text || options.add_node_summary) {
     addNodeText(structure, pages);
   }
 
-  // Step 10: Generate summaries
+  // Step 12: Generate summaries
   if (options.add_node_summary) {
     await generateNodeSummaries(structure, options.model);
   }
 
-  // Step 11: Generate document description
+  // Step 13: Generate document description
   let docDescription: string | undefined;
   if (options.add_doc_description && options.add_node_summary) {
     docDescription = await generateDocDescription(structure, options.model);
   }
 
-  // Step 12: Optionally remove text to save space
+  // Step 14: Optionally remove text to save space
   if (!options.add_node_text && options.add_node_summary) {
-    function removeText(nodes: TreeNode[]) {
+    const removeText = (nodes: TreeNode[]) => {
       for (const node of nodes) {
         delete node.text;
         if (node.nodes) removeText(node.nodes);
       }
-    }
+    };
     removeText(structure);
   }
 
